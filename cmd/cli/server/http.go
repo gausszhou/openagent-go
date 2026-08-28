@@ -73,13 +73,13 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 	opts, skillProvider := buildOpts(opts, caps, m)
 	agentCfg := agent.New(version.Name, opts...)
 
-	tracer, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
+	holder, _, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
 	if err != nil {
 		return fmt.Errorf("telemetry init: %w", err)
 	}
 	defer telemetryShutdown()
 
-	deps := buildRuntimeDeps(caps, cfg.Sensitive, tracer)
+	deps := buildRuntimeDeps(caps, cfg.Sensitive, holder)
 	deps.Tools = tools
 	deps.SkillProvider = skillProvider
 	if caps.OnMemory() {
@@ -102,7 +102,7 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 	// Building it earlier would fork writes to the local sqlite store
 	// while Recall reads the OpenViking index (silent knowledge loss).
 	if caps.OnMemory() && m != nil && deps.MemoryProvider != nil {
-		deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(m, deps.MemoryProvider))
+		deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(func() openagent.Model { return m }, deps.MemoryProvider))
 	}
 	handler := rest.NewHandler(agentCfg, deps).
 		WithSessionStore(store).
@@ -187,6 +187,16 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
 	}()
+
+	// Start settings watcher for hot-reload (telemetry/log-level).
+	// REST mode has no AgentServer so model registry updates are skipped.
+	go watchSettings(ctx, &settingsWatcher{
+		cfgPath:  config.Path(),
+		prev:     cfg,
+		holder:   holder,
+		shutdown: telemetryShutdown,
+		srv:      nil,
+	})
 
 	slog.Info("REST server listening", "addr", addr)
 	err = srv.ListenAndServe()

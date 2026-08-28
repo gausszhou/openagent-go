@@ -81,7 +81,7 @@ func NewHandler(cfg *agent.Agent, deps kernel.Deps) *Handler {
 	}
 	// One shared background extractor per server (never per run).
 	if h.deps.Extractor == nil && h.deps.MemoryProvider != nil && h.cfg.Model != nil {
-		h.deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(h.cfg.Model, h.deps.MemoryProvider))
+		h.deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(func() openagent.Model { return h.cfg.Model }, h.deps.MemoryProvider))
 	}
 
 	bus := eventbus.New[SSEEvent](500)

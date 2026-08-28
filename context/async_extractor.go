@@ -58,6 +58,17 @@ func (e *AsyncExtractor) SetModel(m openagent.Model) {
 	}
 }
 
+// SetModelFn updates the model resolver on the inner LLMExtractor if
+// present. Use this for dynamic model lookup (e.g. from a registry).
+func (e *AsyncExtractor) SetModelFn(fn func() openagent.Model) {
+	if e == nil {
+		return
+	}
+	if llm, ok := e.inner.(*LLMExtractor); ok {
+		llm.SetModelFn(fn)
+	}
+}
+
 // Extract implements Extractor: enqueue (non-blocking, ~µs). The actual
 // extraction runs on the background worker.
 func (e *AsyncExtractor) Extract(ctx context.Context, scope ContextScope, messages []openagent.Message) {

@@ -43,16 +43,34 @@ import (
 
 // Hooks implements openagent.RunHooks via OpenTelemetry spans.
 type Hooks struct {
-	tracer trace.Tracer
+	holder *TracerHolder
 }
 
-// New creates a Hooks that creates spans with the given tracer.
+// New creates a Hooks that creates spans with the given tracer. The tracer
+// is wrapped in a TracerHolder so it can be swapped at runtime (e.g. when
+// telemetry endpoint changes via settings reload).
 func New(tracer trace.Tracer) *Hooks {
-	return &Hooks{tracer: tracer}
+	return &Hooks{holder: NewTracerHolder(tracer)}
+}
+
+// NewWithHolder creates a Hooks backed by an existing TracerHolder, shared
+// with an Observer so both swap together when the tracer is updated.
+func NewWithHolder(h *TracerHolder) *Hooks {
+	return &Hooks{holder: h}
+}
+
+// Holder returns the TracerHolder so the caller can update the tracer
+// at runtime via Holder.Set(newTracer).
+func (h *Hooks) Holder() *TracerHolder {
+	return h.holder
 }
 
 func (h *Hooks) OnAgentStart(ctx context.Context, req openagent.ChatCompletionRequest) (context.Context, any, error) {
-	ctx, span := h.tracer.Start(ctx, "agent.run",
+	tracer := h.holder.Tracer()
+	if tracer == nil {
+		return ctx, nil, nil
+	}
+	ctx, span := tracer.Start(ctx, "agent.run",
 		trace.WithAttributes(
 			// OTel GenAI semantic conventions (gen_ai.*).
 			attribute.String("gen_ai.system", version.Name),
@@ -98,7 +116,11 @@ func (h *Hooks) OnAgentEnd(ctx context.Context, req openagent.ChatCompletionRequ
 }
 
 func (h *Hooks) OnToolStart(ctx context.Context, tool openagent.FunctionDefinition, args json.RawMessage) (context.Context, any, error) {
-	ctx, span := h.tracer.Start(ctx, fmt.Sprintf("tool.%s", tool.Name),
+	tracer := h.holder.Tracer()
+	if tracer == nil {
+		return ctx, nil, nil
+	}
+	ctx, span := tracer.Start(ctx, fmt.Sprintf("tool.%s", tool.Name),
 		trace.WithAttributes(
 			attribute.String("tool.name", tool.Name),
 			attribute.String("tool.args", string(args)),

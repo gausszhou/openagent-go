@@ -132,7 +132,7 @@ func SetupTracer(ctx context.Context, cfg Config) (*SetupResult, error) {
 // processor silently drops spans on export errors). Subsequent failures are
 // suppressed to avoid log spam — one warning is enough.
 type loggingExporter struct {
-	inner     sdktrace.SpanExporter
+	inner      sdktrace.SpanExporter
 	failedOnce sync.Once
 }
 
@@ -154,6 +154,42 @@ func (e *loggingExporter) ExportSpans(ctx context.Context, spans []sdktrace.Read
 
 func (e *loggingExporter) Shutdown(ctx context.Context) error {
 	return e.inner.Shutdown(ctx)
+}
+
+// TracerHolder holds a mutable trace.Tracer so hooks can swap the tracer
+// at runtime (e.g. when telemetry endpoint changes via settings reload).
+// The hooks call Tracer() on every span creation; Set replaces the tracer
+// under a read-write lock.
+type TracerHolder struct {
+	mu sync.RWMutex
+	tr trace.Tracer
+}
+
+// NewTracerHolder wraps a tracer (nil = no-op, spans are never exported).
+func NewTracerHolder(tr trace.Tracer) *TracerHolder {
+	return &TracerHolder{tr: tr}
+}
+
+// Tracer returns the current tracer (nil-safe).
+func (h *TracerHolder) Tracer() trace.Tracer {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.tr
+}
+
+// Set replaces the tracer. Safe to call while hooks are actively creating
+// spans — the read lock ensures in-flight Start calls finish on the old
+// tracer before the swap takes effect.
+func (h *TracerHolder) Set(tr trace.Tracer) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.tr = tr
+	h.mu.Unlock()
 }
 
 // Shutdown flushes pending spans and closes the exporter. Must be called

@@ -10,11 +10,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/config"
 	"github.com/yusheng-g/openagent-go/kernel"
 )
+
+// logWriter holds the active log writer so reconfigureLogLevel can
+// rebuild the slog handler with the same writer but a new level.
+// SetupLog stores the writer here; reconfigureLogLevel reads it.
+var logWriter atomic.Pointer[io.Writer]
 
 // SetupLog configures slog + log package output. Writes to a rotated log
 // file when cfg.File is set; otherwise discards log output silently.
@@ -39,17 +45,22 @@ func SetupLog(cfg config.LogConfig) (func(), error) {
 	}
 
 	// When no log file is configured, fall back to discarding.
-	// log.Printf and slog output go only to the file, never to stderr.
 	if len(mw.writers) == 0 {
 		mw.AddWriter(io.Discard)
 	}
 
-	// slog.
-	h := slog.NewJSONHandler(mw, &slog.HandlerOptions{Level: level})
+	// Store the writer and level for reconfigureLogLevel.
+	var w io.Writer = mw
+	logWriter.Store(&w)
+
+	// Use a level-switchable handler so reconfigureLogLevel can change
+	// the level without rebuilding the handler (and losing the writer).
+	h := slog.NewJSONHandler(mw, &slog.HandlerOptions{
+		Level: level,
+	})
 	slog.SetDefault(slog.New(h))
 
-	// Redirect log.Printf etc. to the same writer so existing
-	// log calls in server packages also land in the log file.
+	// Redirect log.Printf etc. to the same writer.
 	log.SetOutput(mw)
 
 	return func() { mw.Close() }, nil
@@ -68,6 +79,25 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// reconfigureLogLevel changes the global slog level at runtime without
+// losing the log writer. Rebuilds the handler with the stored writer
+// (from SetupLog) and the new level. Called by the settings watcher
+// when log.level changes in settings.json.
+func reconfigureLogLevel(level string) {
+	lvl := parseLevel(level)
+	w := logWriter.Load()
+	if w == nil {
+		// SetupLog not called yet (shouldn't happen in normal flow).
+		slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{
+			Level: lvl,
+		})))
+		return
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(*w, &slog.HandlerOptions{
+		Level: lvl,
+	})))
 }
 
 // ── multiCloser ──

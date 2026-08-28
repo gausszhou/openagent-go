@@ -475,7 +475,7 @@ func NewAgentServer(cfg *agent.Agent, deps kernel.Deps, store session.Store, mod
 	s.approvalMemory = governance.NewPersistentApprovalMemory(s.Runtime)
 	// One shared background extractor per server (never per run).
 	if deps.Extractor == nil && deps.MemoryProvider != nil && cfg.Model != nil {
-		s.Deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(cfg.Model, deps.MemoryProvider))
+		s.Deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(func() openagent.Model { return cfg.Model }, deps.MemoryProvider))
 	}
 	s.cmdRegistry = s.buildCommandRegistry()
 	if s.Models == nil {
@@ -597,7 +597,7 @@ func (s *AgentServer) SetEmbedding(baseURL, apiKey, model string) {
 // modelIDs returns the registered model ids under modelsMu. SetModel
 // (wasm runtime_set_model_config) can insert concurrently from a tool
 // goroutine, so all iterations must go through this helper.
-func (s *AgentServer) modelIDs() []string {
+func (s *AgentServer) ModelIDs() []string {
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
 	ids := make([]string, 0, len(s.Models))
@@ -607,8 +607,20 @@ func (s *AgentServer) modelIDs() []string {
 	return ids
 }
 
+// RemoveModel removes a model from the registry. Called by the settings
+// watcher when a provider/model is removed from settings.json. Existing
+// sessions referencing the removed model keep their runtime snapshot
+// (rt.Model() returns the last-used model), but new sessions will not
+// be able to select it.
+func (s *AgentServer) RemoveModel(key string) {
+	s.modelsMu.Lock()
+	defer s.modelsMu.Unlock()
+	delete(s.Models, key)
+	delete(s.modelConfigs, key)
+}
+
 // lookupModel returns the model registered under id, under modelsMu.
-func (s *AgentServer) lookupModel(id string) (openagent.Model, bool) {
+func (s *AgentServer) LookupModel(id string) (openagent.Model, bool) {
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
 	m, ok := s.Models[id]
@@ -630,7 +642,7 @@ func (s *AgentServer) SetDefaultModelID(id string) bool {
 
 // getDefaultModelID returns the default model id under modelsMu
 // (SetDefaultModelID runs concurrently from the serve loop).
-func (s *AgentServer) getDefaultModelID() string {
+func (s *AgentServer) GetDefaultModelID() string {
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
 	return s.defaultModelID
@@ -683,11 +695,11 @@ func (s *AgentServer) resolveModelConfig(ss *agentSession) (provider, modelID st
 // critical for oaSession.Model in OnPrompt so run()'s session.Model
 // override does not defeat a mid-session model switch.
 func (s *AgentServer) resolveSessionModel(ss *agentSession) openagent.Model {
-	key := s.getDefaultModelID()
+	key := s.GetDefaultModelID()
 	if val, ok := ss.ConfigString("model"); ok {
 		key = val
 	}
-	m, _ := s.lookupModel(key)
+	m, _ := s.LookupModel(key)
 	return m
 }
 
@@ -1361,7 +1373,7 @@ func (s *AgentServer) buildConfigOptions(sid openacp.SessionId) []openacp.Sessio
 	ss := s.getSession(sid)
 	mode := "auto"
 	thoughtLevel := "medium"
-	modelID := s.getDefaultModelID()
+	modelID := s.GetDefaultModelID()
 	if ss != nil {
 		mode = ss.Mode()
 		if val, ok := ss.ConfigString("thought_level"); ok {
@@ -1402,7 +1414,7 @@ func (s *AgentServer) buildConfigOptions(sid openacp.SessionId) []openacp.Sessio
 	}
 
 	// Model selector.
-	if ids := s.modelIDs(); len(ids) > 0 {
+	if ids := s.ModelIDs(); len(ids) > 0 {
 		modelOpts := make([]openacp.SessionConfigOptValue, 0, len(ids))
 		for _, id := range ids {
 			modelOpts = append(modelOpts, openacp.SessionConfigOptValue{Value: id, Name: id})
@@ -1434,6 +1446,28 @@ func (s *AgentServer) buildModeState(sid openacp.SessionId) *openacp.SessionMode
 			{ID: "manual", Name: "Manual", Description: "Your approval is required for AI to perform NONE-READ-ONLY operations"},
 			{ID: "plan", Name: "Plan", Description: "Present the plan first, AI will execute it according to the plan"},
 		},
+	}
+}
+
+// BroadcastConfigOptions sends a config_option_update to every active
+// session so the frontend picks up model list changes (e.g. after a
+// settings reload added/removed models via SetModel). Sessions without
+// an updateSender (CLI one-shot) are skipped.
+func (s *AgentServer) BroadcastConfigOptions() {
+	if s.updateSender == nil {
+		return
+	}
+	s.mu.Lock()
+	ids := make([]openacp.SessionId, 0, len(s.sessions))
+	for sid := range s.sessions {
+		ids = append(ids, sid)
+	}
+	s.mu.Unlock()
+	for _, sid := range ids {
+		s.updateSender.SendSessionUpdate(sid, openacp.SessionUpdate{
+			SessionUpdate: "config_option_update",
+			ConfigOptions: s.buildConfigOptions(sid),
+		})
 	}
 }
 
@@ -1631,7 +1665,7 @@ func (s *AgentServer) OnSetSessionConfigOption(ctx context.Context, req openacp.
 		switch req.ConfigID {
 		case "model":
 			if v, ok := ss.ConfigString("model"); ok {
-				if m, ok := s.lookupModel(v); ok {
+				if m, ok := s.LookupModel(v); ok {
 					s.switchSessionModel(ss, m)
 				} else {
 					// The requested model is not in the provider list —
@@ -2107,19 +2141,19 @@ func (s *AgentServer) buildRuntimeForSession(sid openacp.SessionId, ss *agentSes
 	deps.SkillProvider = s.buildSessionSkillProvider(ss.cwd)
 
 	// Resolve model from the session config registry.
-	modelID := s.getDefaultModelID()
+	modelID := s.GetDefaultModelID()
 	if val, ok := ss.ConfigString("model"); ok {
 		modelID = val
 	}
-	if m, ok := s.lookupModel(modelID); ok {
+	if m, ok := s.LookupModel(modelID); ok {
 		cfg.Model = m
-	} else if m, ok := s.lookupModel(s.getDefaultModelID()); ok {
+	} else if m, ok := s.LookupModel(s.GetDefaultModelID()); ok {
 		// The session's saved model is no longer in the provider list
 		// (removed/renamed after the session was saved) — fall back to the
 		// default instead of leaving cfg.Model nil, which would make a
 		// restored session fail every turn with "no model configured".
-		if v, _ := ss.ConfigString("model"); v != "" && v != s.getDefaultModelID() {
-			slog.Warn("session model not in provider list, falling back to default", "session", sid, "model", v, "default", s.getDefaultModelID())
+		if v, _ := ss.ConfigString("model"); v != "" && v != s.GetDefaultModelID() {
+			slog.Warn("session model not in provider list, falling back to default", "session", sid, "model", v, "default", s.GetDefaultModelID())
 		}
 		cfg.Model = m
 	}
@@ -2551,7 +2585,7 @@ func (s *AgentServer) buildSlashContext(ctx context.Context, sid openacp.Session
 			return out, nil
 		},
 		SetModel: func(modelID string) error {
-			m, ok := s.lookupModel(modelID)
+			m, ok := s.LookupModel(modelID)
 			if !ok {
 				return fmt.Errorf("unknown model: %s", modelID)
 			}
@@ -2568,7 +2602,7 @@ func (s *AgentServer) buildSlashContext(ctx context.Context, sid openacp.Session
 			return nil
 		},
 		ListModels: func() []string {
-			return s.modelIDs()
+			return s.ModelIDs()
 		},
 		// Both callbacks touch the session runtime, which is built lazily
 		// on the first prompt (slash dispatch runs BEFORE that build). Build

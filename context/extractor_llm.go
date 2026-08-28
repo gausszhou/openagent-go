@@ -70,32 +70,49 @@ const maxKnowledgeItems = 10
 // LLMExtractor extracts knowledge with the runtime model.
 type LLMExtractor struct {
 	mu sync.RWMutex
-	// Model is the model used for extraction (the runtime's resolved model).
-	Model openagent.Model
+	// modelFn resolves the current model at extraction time (not held as
+	// a snapshot). This ensures the extractor always uses the latest model
+	// instance — when SetModel updates the registry (new api_key/base_url),
+	// the next extraction picks it up without an explicit SetModel call.
+	modelFn func() openagent.Model
 	// Provider stores extracted knowledge.
 	Provider MemoryProvider
 	// MaxItems caps stored items per pass (default 10).
 	MaxItems int
 }
 
-// NewLLMExtractor creates an extractor. A nil provider yields a no-op.
-func NewLLMExtractor(model openagent.Model, p MemoryProvider) *LLMExtractor {
-	return &LLMExtractor{Model: model, Provider: p, MaxItems: maxKnowledgeItems}
+// NewLLMExtractor creates an extractor. modelFn resolves the model at
+// extraction time; a nil function or nil model yields a no-op.
+func NewLLMExtractor(modelFn func() openagent.Model, p MemoryProvider) *LLMExtractor {
+	return &LLMExtractor{modelFn: modelFn, Provider: p, MaxItems: maxKnowledgeItems}
 }
 
-// SetModel updates the model used for extraction. Safe to call
-// concurrently with Extract; the next call uses the new model.
+// SetModel updates the model resolver. Safe to call concurrently with
+// Extract; the next call uses the new resolver.
 func (e *LLMExtractor) SetModel(m openagent.Model) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.Model = m
+	e.modelFn = func() openagent.Model { return m }
+}
+
+// SetModelFn updates the model resolver function. Use this when the
+// model should be looked up dynamically (e.g. from a registry that may
+// be updated at runtime).
+func (e *LLMExtractor) SetModelFn(fn func() openagent.Model) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.modelFn = fn
 }
 
 // Extract implements Extractor.
 func (e *LLMExtractor) Extract(ctx context.Context, scope ContextScope, messages []openagent.Message) {
 	e.mu.RLock()
-	model := e.Model
+	modelFn := e.modelFn
 	e.mu.RUnlock()
+	var model openagent.Model
+	if modelFn != nil {
+		model = modelFn()
+	}
 	if e == nil || model == nil || e.Provider == nil || len(messages) == 0 {
 		return
 	}

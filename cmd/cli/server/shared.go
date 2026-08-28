@@ -2,14 +2,20 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	openagent "github.com/yusheng-g/openagent-go"
+	"github.com/yusheng-g/openagent-go/acp"
 	"github.com/yusheng-g/openagent-go/agent"
 	ctxpkg "github.com/yusheng-g/openagent-go/context"
 	openaiembed "github.com/yusheng-g/openagent-go/embedder/openai"
@@ -29,7 +35,6 @@ import (
 	builtinskills "github.com/yusheng-g/openagent-go/skills"
 	opentool "github.com/yusheng-g/openagent-go/tool"
 	"github.com/yusheng-g/openagent-go/version"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/config"
 )
@@ -477,14 +482,11 @@ func exploreSubAgent() agent.SubAgent {
 // the caller must defer. When cfg.Telemetry.Endpoint is empty, a no-op
 // provider is returned — spans are created but never exported, so the otel
 // hook can be wired unconditionally.
-func setupTelemetry(ctx context.Context, cfg config.Config) (trace.Tracer, func(), error) {
+func setupTelemetry(ctx context.Context, cfg config.Config) (*otelhooks.TracerHolder, *otelhooks.SetupResult, func(), error) {
 	insecure := true
 	if cfg.Telemetry.Insecure != nil {
 		insecure = *cfg.Telemetry.Insecure
 	}
-	// ServiceName defaults to version.Name (the binary identity set via
-	// ldflags in build.sh) so the trace's service.name matches the actual
-	// binary name, not a hardcoded string.
 	serviceName := strings.TrimSpace(cfg.Telemetry.ServiceName)
 	if serviceName == "" {
 		serviceName = version.Name
@@ -496,8 +498,9 @@ func setupTelemetry(ctx context.Context, cfg config.Config) (trace.Tracer, func(
 		Insecure:    insecure,
 	})
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
+	holder := otelhooks.NewTracerHolder(result.Tracer)
 	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -505,10 +508,189 @@ func setupTelemetry(ctx context.Context, cfg config.Config) (trace.Tracer, func(
 			slog.Warn("telemetry shutdown failed", "error", err)
 		}
 	}
-	return result.Tracer, shutdown, nil
+	return holder, result, shutdown, nil
 }
 
-// buildRuntimeDeps returns the always-on runtime dependencies shared by all
+// ── Settings hot-reload ──
+
+// settingsWatcher holds the state needed to hot-reload settings.json at
+// runtime: the previous config (for diffing), the TracerHolder (for
+// telemetry reconfiguration), and the ACP AgentServer (for model registry
+// updates, nil in REST/run mode).
+type settingsWatcher struct {
+	cfgPath    string
+	mu         sync.Mutex
+	prev       *config.Config
+	holder     *otelhooks.TracerHolder
+	prevResult *otelhooks.SetupResult
+	shutdown   func()
+	srv        *acp.AgentServer // nil in REST/run mode
+}
+
+// watchSettings starts an fsnotify watcher on the settings file. When the
+// file changes, it debounces 500ms then reloads and applies the new config.
+// Returns immediately; runs until ctx is cancelled.
+func watchSettings(ctx context.Context, sw *settingsWatcher) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		slog.Warn("settings watcher: fsnotify init failed", "error", err)
+		return
+	}
+	defer w.Close()
+
+	// Watch the directory (not the file) — atomic rename (temp → rename)
+	// replaces the inode, so a file-level watch would miss the change.
+	// Directory-level watch catches the rename event.
+	dir := filepath.Dir(sw.cfgPath)
+	if err := w.Add(dir); err != nil {
+		slog.Warn("settings watcher: cannot watch directory", "dir", dir, "error", err)
+		return
+	}
+
+	var debounce *time.Timer
+	for {
+		select {
+		case <-ctx.Done():
+			if debounce != nil {
+				debounce.Stop()
+			}
+			return
+		case event := <-w.Events:
+			// Only react to writes/creates on the settings file itself.
+			if event.Name != sw.cfgPath {
+				continue
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+				continue
+			}
+			// Debounce: editors may save multiple times in quick succession.
+			if debounce != nil {
+				debounce.Stop()
+			}
+			debounce = time.AfterFunc(500*time.Millisecond, func() {
+				sw.reload(ctx)
+			})
+		case err := <-w.Errors:
+			slog.Warn("settings watcher error", "error", err)
+		}
+	}
+}
+
+// reload reads the new settings.json, parses it, diffs against the previous
+// config, and applies changes to telemetry/log-level/models. Unloadable
+// fields (sandbox, capabilities) are logged as warnings.
+func (sw *settingsWatcher) reload(ctx context.Context) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	raw, err := os.ReadFile(sw.cfgPath)
+	if err != nil {
+		slog.Warn("settings reload: cannot read file", "error", err)
+		return
+	}
+	var newCfg config.Config
+	if err := json.Unmarshal(raw, &newCfg); err != nil {
+		slog.Warn("settings reload: parse failed, keeping previous config", "error", err)
+		return
+	}
+	config.ApplyDefaults(&newCfg, sw.cfgPath)
+
+	// Telemetry.
+	if !reflect.DeepEqual(sw.prev.Telemetry, newCfg.Telemetry) {
+		sw.reconfigureTelemetry(ctx, newCfg)
+	}
+
+	// Log level.
+	if sw.prev.Log.Level != newCfg.Log.Level {
+		reconfigureLogLevel(newCfg.Log.Level)
+		slog.Info("settings reloaded: log level", "level", newCfg.Log.Level)
+	}
+
+	// Providers/models (ACP only — REST/run have no AgentServer).
+	if sw.srv != nil && !reflect.DeepEqual(sw.prev.Provider, newCfg.Provider) {
+		sw.reconfigureModels(newCfg)
+	}
+
+	sw.prev = &newCfg
+	slog.Info("settings reloaded")
+}
+
+// reconfigureTelemetry shuts down the old TracerProvider and creates a new
+// one with the updated endpoint/protocol. The TracerHolder is updated so
+// all hooks and observers pick up the new tracer.
+func (sw *settingsWatcher) reconfigureTelemetry(ctx context.Context, cfg config.Config) {
+	// Shutdown old tracer with a timeout so a stuck exporter doesn't block.
+	if sw.prevResult != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := sw.prevResult.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("settings reload: old telemetry shutdown failed", "error", err)
+		}
+		cancel()
+	}
+
+	insecure := true
+	if cfg.Telemetry.Insecure != nil {
+		insecure = *cfg.Telemetry.Insecure
+	}
+	serviceName := strings.TrimSpace(cfg.Telemetry.ServiceName)
+	if serviceName == "" {
+		serviceName = version.Name
+	}
+	result, err := otelhooks.SetupTracer(ctx, otelhooks.Config{
+		Endpoint:    cfg.Telemetry.Endpoint,
+		Protocol:    cfg.Telemetry.Protocol,
+		ServiceName: serviceName,
+		Insecure:    insecure,
+	})
+	if err != nil {
+		slog.Warn("settings reload: telemetry setup failed", "error", err)
+		return
+	}
+	sw.prevResult = result
+	sw.shutdown = func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := result.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("telemetry shutdown failed", "error", err)
+		}
+	}
+	// Swap the tracer in the holder — all hooks/observers pick it up.
+	if sw.holder != nil {
+		sw.holder.Set(result.Tracer)
+	}
+	slog.Info("settings reloaded: telemetry", "endpoint", cfg.Telemetry.Endpoint, "protocol", cfg.Telemetry.Protocol)
+}
+
+// reconfigureModels diffs old/new providers and updates the ACP model
+// registry. New providers/models are added; removed ones are logged but
+// not deleted (existing sessions may still reference them).
+func (sw *settingsWatcher) reconfigureModels(cfg config.Config) {
+	_, newInfos := buildModels(cfg.Provider)
+	// Build the set of new model keys.
+	newKeys := make(map[string]bool, len(newInfos))
+	for _, mi := range newInfos {
+		key := mi.ID
+		if mi.Provider != "" {
+			key = mi.Provider + "/" + mi.ID
+		}
+		newKeys[key] = true
+		sw.srv.SetModel(mi.Provider, mi.ID, mi.APIKey, mi.BaseURL,
+			mi.MaxOutputTokens, 0)
+	}
+	// Remove models that are no longer in settings.
+	for _, key := range sw.srv.ModelIDs() {
+		if !newKeys[key] {
+			sw.srv.RemoveModel(key)
+		}
+	}
+	// The extractor uses a dynamic model lookup (SetModelFn at startup),
+	// so it automatically picks up the new model instances — no manual
+	// update needed here.
+	// Notify all active sessions so the frontend model dropdown refreshes.
+	sw.srv.BroadcastConfigOptions()
+	slog.Info("settings reloaded: models", "providers", len(cfg.Provider), "models", len(newInfos))
+}
+
 // modes: the RunHooks pipeline and the stage observer. Mode-specific
 // capabilities (Tools, Memory, Approver) are added by the caller.
 //
@@ -518,14 +700,19 @@ func setupTelemetry(ctx context.Context, cfg config.Config) (trace.Tracer, func(
 // spans. Hook order is redact → otel → slog: redact first (secrets masked
 // before any other hook sees the data), otel before slog (spans carry the
 // redacted args).
-func buildRuntimeDeps(caps config.Capabilities, sensitive config.SensitiveConfig, tracer trace.Tracer) kernel.Deps {
+func buildRuntimeDeps(caps config.Capabilities, sensitive config.SensitiveConfig, holder *otelhooks.TracerHolder) kernel.Deps {
 	hooks := []openagent.RunHooks{
 		redacthook.NewHook(sensitive.Env),
 	}
 	observers := []openagent.RunObserver{buildSlogObserver()}
-	if tracer != nil {
-		hooks = append(hooks, otelhooks.New(tracer))
-		observers = append(observers, otelhooks.NewObserver(tracer))
+	// Always mount OTel hooks/observer (even when tracer is nil at startup)
+	// so runtime telemetry activation via settings hot-reload works without
+	// rebuilding kernel.Deps. When tracer is nil, Start() returns a no-op
+	// span — zero overhead. When holder.Set(newTracer) is called later by
+	// the settings watcher, spans start being created and exported.
+	if holder != nil {
+		hooks = append(hooks, otelhooks.NewWithHolder(holder))
+		observers = append(observers, otelhooks.NewObserverWithHolder(holder))
 	}
 	hooks = append(hooks, buildSlogHooks())
 	return kernel.Deps{

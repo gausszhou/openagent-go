@@ -116,6 +116,7 @@ func main() {
 	rootCmd.AddCommand(buildRunCmd(cfg))
 	rootCmd.AddCommand(buildTuiCmd(cfg))
 	rootCmd.AddCommand(keyringCmd)
+	rootCmd.AddCommand(buildSettingsCmd())
 
 	// 7. Wrap every command's RunE to notify observers on entry/exit.
 	// Treat context cancellation as normal shutdown — do not report
@@ -423,6 +424,83 @@ Wrap your message in quotes when it contains spaces:
 			return server.RunCLI(cmd.Context(), &cfg, args[0])
 		},
 	}
+	return cmd
+}
+
+// ── settings ──
+
+// buildSettingsCmd creates the `settings` subcommand for reading and
+// modifying settings.json. Supports dotted-path keys (e.g.
+// "telemetry.endpoint", "provider.openai.apikey"). Changes are written
+// atomically; a running server detects the file change via fsnotify and
+// hot-reloads applicable config (telemetry, log level, providers).
+func buildSettingsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "settings",
+		Short: "Read and modify settings.json",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Set a setting (dotted path, e.g. telemetry.endpoint)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := config.SetSetting(args[0], args[1]); err != nil {
+				return fmt.Errorf("settings set: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "set %s = %s\n", args[0], args[1])
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "get <key>",
+		Short: "Get a setting value (dotted path)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			val, err := config.GetSetting(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, val)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List all settings",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			val, err := config.ListSettings()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stdout, val)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "append <key> <value>",
+		Short: "Append a value to an array setting (dotted path)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := config.AppendSetting(args[0], args[1]); err != nil {
+				return fmt.Errorf("settings append: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "appended to %s\n", args[0])
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "delete <key>",
+		Short: "Delete a setting or array element (dotted path)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := config.DeleteSetting(args[0]); err != nil {
+				return fmt.Errorf("settings delete: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "deleted %s\n", args[0])
+			return nil
+		},
+	})
 	return cmd
 }
 

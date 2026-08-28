@@ -29,20 +29,28 @@ import (
 // (tool.execute runs on job goroutines). The spanStore is mutex-protected;
 // each enter/leave pair is keyed uniquely.
 type Observer struct {
-	tracer trace.Tracer
+	holder *TracerHolder
 }
 
 // NewObserver creates an Observer that creates stage spans with the given
-// tracer. The tracer should be the same one passed to New (Hooks) so stage
-// spans attach to the agent.run span.
+// tracer. The tracer is wrapped in a TracerHolder so it can be swapped at
+// runtime; pass the same holder as Hooks via NewObserverWithHolder so both
+// swap together.
 func NewObserver(tracer trace.Tracer) *Observer {
-	return &Observer{tracer: tracer}
+	return &Observer{holder: NewTracerHolder(tracer)}
+}
+
+// NewObserverWithHolder creates an Observer backed by an existing
+// TracerHolder, shared with Hooks so both swap together.
+func NewObserverWithHolder(h *TracerHolder) *Observer {
+	return &Observer{holder: h}
 }
 
 // ObserveStage implements openagent.RunObserver. On "enter" it starts a span;
 // on "leave" it ends the span with duration and error.
 func (o *Observer) ObserveStage(ctx context.Context, event openagent.StageEvent) {
-	if o.tracer == nil {
+	tracer := o.holder.Tracer()
+	if tracer == nil {
 		return
 	}
 
@@ -65,7 +73,7 @@ func (o *Observer) ObserveStage(ctx context.Context, event openagent.StageEvent)
 		}
 		// Merge stage-specific detail attributes.
 		attrs = append(attrs, detailAttrs(event.Detail)...)
-		_, span := o.tracer.Start(ctx, event.Name,
+		_, span := tracer.Start(ctx, event.Name,
 			trace.WithAttributes(attrs...),
 		)
 		stageSpans.store(eventKey(event), span)
@@ -180,7 +188,8 @@ func (s *spanStore) loadDecisionSpan(runID string, turnID int) trace.Span {
 // span (looked up by runID+turnID). If no stage span is active, the event is
 // dropped — decisions always happen inside a stage.
 func (o *Observer) ObserveDecision(ctx context.Context, event openagent.DecisionEvent) {
-	if o.tracer == nil {
+	// No tracer → no spans were created → no span to add events to.
+	if o.holder.Tracer() == nil {
 		return
 	}
 	// Find the active stage span for this run+turn. Decisions happen inside

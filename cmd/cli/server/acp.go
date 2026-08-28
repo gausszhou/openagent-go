@@ -85,13 +85,16 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	opts, skillProvider := buildOpts(opts, caps, firstM)
 	agentCfg := agent.New(version.Name, opts...)
 
-	tracer, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
+	holder, _, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("telemetry init: %w", err)
 	}
-	defer telemetryShutdown()
+	// NOTE: telemetryShutdown is NOT deferred here — BuildACPServer returns
+	// immediately and its defers would fire before server.Run starts, shutting
+	// down the TracerProvider prematurely. It is wired into the returned
+	// cleanup func so the caller defers it at the right scope.
 
-	deps := buildRuntimeDeps(caps, cfg.Sensitive, tracer)
+	deps := buildRuntimeDeps(caps, cfg.Sensitive, holder)
 	deps.SkillProvider = skillProvider
 	// Pass nil Mem when --memory=off so the AgentServer skips history
 	// replay and memory cleanup (all s.Mem uses are nil-guarded). The
@@ -144,10 +147,25 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	// while Recall reads the OpenViking index (silent knowledge loss).
 	var extractor *ctxpkg.AsyncExtractor
 	if caps.OnMemory() && firstM != nil && deps.MemoryProvider != nil {
-		extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(firstM, deps.MemoryProvider))
+		extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(func() openagent.Model { return firstM }, deps.MemoryProvider))
 		deps.Extractor = extractor
 	}
 	srv := acp.NewAgentServer(agentCfg, deps, sessionStore, modelMap)
+
+	// Switch the extractor to dynamic model lookup so it always uses the
+	// server's current default model (picked up from the registry, which
+	// SetModel updates at runtime). This covers the case where the user
+	// changes api_key/base_url in settings without switching models.
+	if extractor != nil {
+		extractor.SetModelFn(func() openagent.Model {
+			if id := srv.GetDefaultModelID(); id != "" {
+				if m, ok := srv.LookupModel(id); ok {
+					return m
+				}
+			}
+			return firstM
+		})
+	}
 	srv.AgentName = version.Name
 	srv.AgentVersion = version.Version
 	srv.MCPEnabled = caps.OnMCP()
@@ -200,6 +218,15 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	server := openacpsdk.NewServer(version.Name, version.Version, srv)
 	server.SetLogger(slog.Default())
 
+	// Start settings watcher for hot-reload (telemetry/log-level/models).
+	go watchSettings(ctx, &settingsWatcher{
+		cfgPath:  config.Path(),
+		prev:     cfg,
+		holder:   holder,
+		shutdown: telemetryShutdown,
+		srv:      srv,
+	})
+
 	// Channel agent: clone the template and inject a default Model + Tools
 	// so the IM bot can run standalone (the ACP path resolves the model per
 	// session, but channels call kernel.New(...).RunStream directly).
@@ -227,7 +254,13 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 		slog.Warn("channel error", "error", err)
 	}
 
-	return server, cleanup, nil
+	// Wrap cleanup to also shutdown telemetry (TracerProvider flush).
+	// This runs when the caller defers cleanup() — after server.Run exits.
+	teardown := func() {
+		cleanup()
+		telemetryShutdown()
+	}
+	return server, teardown, nil
 }
 
 // RunACPTransport builds the ACP server (same as RunACP) but serves on

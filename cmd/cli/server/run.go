@@ -69,13 +69,13 @@ func RunCLI(ctx context.Context, cfg *config.Config, message string) error {
 	opts, skillProvider := buildOpts(opts, caps, m)
 	agentCfg := agent.New(version.Name, opts...)
 
-	tracer, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
+	holder, _, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
 	if err != nil {
 		return fmt.Errorf("telemetry init: %w", err)
 	}
 	defer telemetryShutdown()
 
-	deps := buildRuntimeDeps(caps, cfg.Sensitive, tracer)
+	deps := buildRuntimeDeps(caps, cfg.Sensitive, holder)
 	deps.Tools = tools
 	deps.SkillProvider = skillProvider
 	if caps.OnMemory() {
@@ -85,7 +85,7 @@ func RunCLI(ctx context.Context, cfg *config.Config, message string) error {
 		// One shared background extractor: knowledge from this run is
 		// stored and recalled by later runs (and by the servers sharing
 		// this db).
-		deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(m, knowledge))
+		deps.Extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(func() openagent.Model { return m }, knowledge))
 	}
 	if caps.OnMemory() && caps.OnSummarizer() && m != nil {
 		sumz := summarizer.New(m).WithMaxTokens(agentCfg.MaxCompressedTokens)
