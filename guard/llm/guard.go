@@ -26,7 +26,7 @@ import (
 // The judge model can be a smaller, faster model (e.g., gpt-4o-mini) — it
 // does not need to be the same model used for the main conversation.
 type Guard struct {
-	model        openagent.Model
+	modelFn      func() openagent.Model
 	inputPrompt  string
 	outputPrompt string
 	failOpen     bool // true = allow on judge error (default false = block)
@@ -48,7 +48,21 @@ func WithFailOpen(v bool) Option { return func(g *Guard) { g.failOpen = v } }
 // New creates a Guard that uses the given Model as a safety judge.
 func New(model openagent.Model, opts ...Option) *Guard {
 	g := &Guard{
-		model:        model,
+		modelFn:      func() openagent.Model { return model },
+		inputPrompt:  defaultInputPrompt,
+		outputPrompt: defaultOutputPrompt,
+	}
+	for _, o := range opts {
+		o(g)
+	}
+	return g
+}
+
+// NewWithLookup creates a Guard that resolves the model at call time via
+// modelFn, so api_key/base_url changes propagate without rebuilding.
+func NewWithLookup(modelFn func() openagent.Model, opts ...Option) *Guard {
+	g := &Guard{
+		modelFn:      modelFn,
 		inputPrompt:  defaultInputPrompt,
 		outputPrompt: defaultOutputPrompt,
 	}
@@ -90,7 +104,11 @@ func (og *outputGuard) Check(ctx context.Context, output governance.GuardOutput)
 // ── Judge ──
 
 func (g *Guard) judge(ctx context.Context, systemPrompt, content string) governance.GuardResult {
-	resp, err := g.model.ChatCompletion(ctx, openagent.ChatCompletionRequest{
+	model := g.modelFn()
+	if model == nil {
+		return governance.GuardResult{Allowed: !g.failOpen, Reason: "guard: no model configured"}
+	}
+	resp, err := model.ChatCompletion(ctx, openagent.ChatCompletionRequest{
 		Messages: []openagent.Message{
 			{Role: openagent.RoleSystem, Content: systemPrompt},
 			{Role: openagent.RoleUser, Content: content},
@@ -143,7 +161,11 @@ func (g *Guard) judge(ctx context.Context, systemPrompt, content string) governa
 // failure — parseResult on "" fails, so the fail-open/closed decision
 // stays in judge()).
 func (g *Guard) retryJudge(ctx context.Context, systemPrompt, prev string) string {
-	resp, err := g.model.ChatCompletion(ctx, openagent.ChatCompletionRequest{
+	model := g.modelFn()
+	if model == nil {
+		return ""
+	}
+	resp, err := model.ChatCompletion(ctx, openagent.ChatCompletionRequest{
 		Messages: []openagent.Message{
 			{Role: openagent.RoleSystem, Content: systemPrompt},
 			{Role: openagent.RoleUser, Content: prev},

@@ -22,6 +22,7 @@ import (
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/config"
 	ctxpkg "github.com/yusheng-g/openagent-go/context"
+	"github.com/yusheng-g/openagent-go/guard/llm"
 )
 
 // RunACP starts the agent in ACP mode over stdio.
@@ -60,18 +61,28 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 
 	modelMap := make(map[string]openagent.Model, len(modelInfos))
 	for _, mi := range modelInfos {
-		key := mi.ID
-		if mi.Provider != "" {
-			key = mi.Provider + "/" + mi.ID
-		}
-		modelMap[key] = mi.Model
+		modelMap[mi.Key()] = mi.Model
 	}
 
 	// Summarizer and Memory are enabled by default; allow --summarizer=off
 	// and --memory=off to disable them.
-	var firstM openagent.Model
-	if len(modelInfos) > 0 {
-		firstM = modelInfos[0].Model
+
+	// srv is declared here so dynamicModel (below) can close over the
+	// variable — the closure reads srv at CALL time, not construction time,
+	// so it sees the assigned value once NewAgentServer returns. This lets
+	// the summarizer/extractor/guard be constructed with the real resolver
+	// in one pass, with no placeholder + later SetModelFn override.
+	var srv *acp.AgentServer
+	dynamicModel := func() openagent.Model {
+		if srv == nil {
+			return nil
+		}
+		if id := srv.GetDefaultModelID(); id != "" {
+			if m, ok := srv.LookupModel(id); ok {
+				return m
+			}
+		}
+		return nil
 	}
 
 	// Tools and sandbox are created once per session (buildRuntimeForSession)
@@ -82,7 +93,17 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 		agent.WithSystemPrompts(resolveProfiles("")...),
 		agent.WithMaxTurns(500),
 	}
-	opts, skillProvider := buildOpts(opts, caps, firstM)
+	// The guard resolves the judge model via dynamicModel (server default),
+	// so it stays in sync with runtime model switches / api_key changes.
+	// Guard is a template-level shared component (not per-session); it reads
+	// the server default, not each session's model. buildOpts only handles
+	// skills + sub-agents.
+	if caps.OnGuard() {
+		g := llm.NewWithLookup(dynamicModel)
+		opts = append(opts, agent.WithInputGuard(g))
+		opts = append(opts, agent.WithOutputGuard(g.Output()))
+	}
+	opts, skillProvider := buildOpts(opts, caps)
 	agentCfg := agent.New(version.Name, opts...)
 
 	holder, _, telemetryShutdown, err := setupTelemetry(ctx, *cfg)
@@ -105,12 +126,13 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 		deps.MemoryProvider = knowledge
 	}
 
+	// Summarizer resolves the model via dynamicModel at call time. Summarize
+	// is nil-safe (returns an error → prepare.go degrades to tail-trim), so
+	// construction does not depend on a model being configured yet.
 	var sumz *summarizer.Compressor
-	if caps.OnMemory() && caps.OnSummarizer() && firstM != nil {
-		sumz = summarizer.New(firstM).WithMaxTokens(agentCfg.MaxCompressedTokens)
+	if caps.OnMemory() && caps.OnSummarizer() {
+		sumz = summarizer.NewWithLookup(dynamicModel).WithMaxTokens(agentCfg.MaxCompressedTokens)
 		ms.WithSummarizer(sumz)
-		// Share the summarizer with sub-agent children so their in-memory
-		// stores get compaction parity with the parent.
 		deps.Summarizer = sumz
 	}
 
@@ -145,27 +167,14 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	// AFTER applyContextProviders so the effective provider is used.
 	// Building it earlier would fork writes to the local sqlite store
 	// while Recall reads the OpenViking index (silent knowledge loss).
+	// NewLLMExtractor is nil-safe (nil model → no-op), so construction does
+	// not depend on a model being configured yet.
 	var extractor *ctxpkg.AsyncExtractor
-	if caps.OnMemory() && firstM != nil && deps.MemoryProvider != nil {
-		extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(func() openagent.Model { return firstM }, deps.MemoryProvider))
+	if caps.OnMemory() && deps.MemoryProvider != nil {
+		extractor = ctxpkg.NewAsyncExtractor(ctxpkg.NewLLMExtractor(dynamicModel, deps.MemoryProvider))
 		deps.Extractor = extractor
 	}
-	srv := acp.NewAgentServer(agentCfg, deps, sessionStore, modelMap)
-
-	// Switch the extractor to dynamic model lookup so it always uses the
-	// server's current default model (picked up from the registry, which
-	// SetModel updates at runtime). This covers the case where the user
-	// changes api_key/base_url in settings without switching models.
-	if extractor != nil {
-		extractor.SetModelFn(func() openagent.Model {
-			if id := srv.GetDefaultModelID(); id != "" {
-				if m, ok := srv.LookupModel(id); ok {
-					return m
-				}
-			}
-			return firstM
-		})
-	}
+	srv = acp.NewAgentServer(agentCfg, deps, sessionStore, modelMap)
 	srv.AgentName = version.Name
 	srv.AgentVersion = version.Version
 	srv.MCPEnabled = caps.OnMCP()
@@ -179,11 +188,7 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 
 	// Register model configs for runtime_set_model_config.
 	for _, mi := range modelInfos {
-		key := mi.ID
-		if mi.Provider != "" {
-			key = mi.Provider + "/" + mi.ID
-		}
-		srv.RegisterModel(key, mi.Provider, mi.ID, mi.APIKey, mi.BaseURL, acp.ModelPricing{
+		srv.RegisterModel(mi.Key(), mi.Provider, mi.ID, mi.APIKey, mi.BaseURL, acp.ModelPricing{
 			MaxOutputTokens:        mi.MaxOutputTokens,
 			InputCostPerToken:      mi.InputCostPerToken,
 			InputCacheCostPerToken: mi.InputCacheCostPerToken,

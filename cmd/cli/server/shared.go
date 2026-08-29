@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,6 @@ import (
 	"github.com/yusheng-g/openagent-go/agent"
 	ctxpkg "github.com/yusheng-g/openagent-go/context"
 	openaiembed "github.com/yusheng-g/openagent-go/embedder/openai"
-	"github.com/yusheng-g/openagent-go/guard/llm"
 	otelhooks "github.com/yusheng-g/openagent-go/hooks/otel"
 	redacthook "github.com/yusheng-g/openagent-go/hooks/redact"
 	sloghooks "github.com/yusheng-g/openagent-go/hooks/slog"
@@ -87,11 +87,20 @@ func buildMemory(emb config.EmbeddingConfig, embedder bool) (*sessionsqlite.Mess
 	}, nil
 }
 
-// buildModels creates OpenAI model instances from config providers.
+// buildModels creates OpenAI model instances from config providers. Provider
+// keys are sorted so the model order is deterministic (callers that fall back
+// to "the first model" — resolveModel, NewAgentServer's default — pick the
+// same one every run, not a random map iteration order).
 func buildModels(providers map[string]config.ProviderConfig) ([]openagent.Model, []modelReg) {
+	pids := make([]string, 0, len(providers))
+	for pid := range providers {
+		pids = append(pids, pid)
+	}
+	sort.Strings(pids)
 	var models []openagent.Model
 	var infos []modelReg
-	for pid, p := range providers {
+	for _, pid := range pids {
+		p := providers[pid]
 		for _, mc := range p.Models {
 			apiKey := p.APIKey
 			if apiKey == "" {
@@ -133,10 +142,34 @@ type modelReg struct {
 	OutputCostPerToken     float64
 }
 
-func firstModel(models []openagent.Model) openagent.Model {
-	for _, m := range models {
-		if m != nil {
-			return m
+// Key returns the registry key for this model: "<provider>/<id>" when a
+// provider is set, else just "<id>". This is the canonical key format used
+// by modelMap, RegisterModel, resolveModel, and reconfigureModels — keep
+// them consistent by routing through here.
+func (mi modelReg) Key() string {
+	if mi.Provider != "" {
+		return mi.Provider + "/" + mi.ID
+	}
+	return mi.ID
+}
+
+// resolveModel picks the model instance for REST/CLI (single-model modes).
+// settings "model" ("<provider>/<modelID>") wins when it matches a registered
+// model; otherwise the first configured model is used as a fallback. This
+// mirrors ACP's srv.SetDefaultModelID(cfg.Model) so all three entrypoints
+// honor the same settings.model preference instead of REST/CLI silently
+// picking a random map-iteration order.
+func resolveModel(cfgModel string, infos []modelReg) openagent.Model {
+	if cfgModel != "" {
+		for _, mi := range infos {
+			if mi.Key() == cfgModel {
+				return mi.Model
+			}
+		}
+	}
+	for _, mi := range infos {
+		if mi.Model != nil {
+			return mi.Model
 		}
 	}
 	return nil
@@ -407,11 +440,6 @@ func skillDirs() []fs.RootEntry {
 	return dirs
 }
 
-// buildGuard creates an LLM guard using the given model as judge.
-func buildGuard(model openagent.Model) *llm.Guard {
-	return llm.New(model)
-}
-
 // buildSlogHooks creates slog-based RunHooks (the lifecycle axis).
 func buildSlogHooks() openagent.RunHooks {
 	return sloghooks.New(slog.Default())
@@ -430,19 +458,15 @@ func buildSlogObserver() openagent.RunObserver {
 	return sloghooks.NewObserver(slog.Default())
 }
 
-// buildOpts appends capability-gated agent options (skills, guard) to opts
-// and returns the skill provider for the runtime deps. model is used by the
-// guard; it may be nil if no models are configured, in which case the guard
-// is skipped regardless of caps.
-func buildOpts(opts []agent.Option, caps config.Capabilities, model openagent.Model) ([]agent.Option, skill.Provider) {
+// buildOpts appends capability-gated agent options (skills, sub-agents) to
+// opts and returns the skill provider for the runtime deps. The guard is NOT
+// wired here — it is constructed by each entrypoint (RunACP/RunREST/RunCLI)
+// so it can resolve the judge model at the right scope: ACP uses the server's
+// dynamic lookup (after srv exists), REST/CLI use a static model closure.
+func buildOpts(opts []agent.Option, caps config.Capabilities) ([]agent.Option, skill.Provider) {
 	var sp skill.Provider
 	if caps.OnSkills() {
 		sp = openSkillProvider()
-	}
-	if caps.OnGuard() && model != nil {
-		g := buildGuard(model)
-		opts = append(opts, agent.WithInputGuard(g))
-		opts = append(opts, agent.WithOutputGuard(g.Output()))
 	}
 	// explore is a read-only code-exploration sub-agent. Its tool allowlist
 	// (read/ls/grep/shell) keeps it from mutating files; filterChildTools
@@ -669,11 +693,7 @@ func (sw *settingsWatcher) reconfigureModels(cfg config.Config) {
 	// Build the set of new model keys.
 	newKeys := make(map[string]bool, len(newInfos))
 	for _, mi := range newInfos {
-		key := mi.ID
-		if mi.Provider != "" {
-			key = mi.Provider + "/" + mi.ID
-		}
-		newKeys[key] = true
+		newKeys[mi.Key()] = true
 		sw.srv.SetModel(mi.Provider, mi.ID, mi.APIKey, mi.BaseURL,
 			mi.MaxOutputTokens, 0)
 	}

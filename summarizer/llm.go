@@ -22,7 +22,7 @@ import (
 // Model to produce incremental summaries.
 type Compressor struct {
 	mu        sync.RWMutex
-	model     openagent.Model
+	modelFn   func() openagent.Model
 	maxTokens int // 0 = no hint; non-zero = prompt the model to keep the summary under this
 	// backoff returns the wait before retry attempt N (1-based). nil uses
 	// the default exponential backoff. Overridable in tests to avoid sleeps.
@@ -31,7 +31,14 @@ type Compressor struct {
 
 // New creates a Compressor backed by m.
 func New(m openagent.Model) *Compressor {
-	return &Compressor{model: m}
+	return &Compressor{modelFn: func() openagent.Model { return m }}
+}
+
+// NewWithLookup creates a Compressor that resolves the model at call time
+// via modelFn, so api_key/base_url changes in the registry propagate
+// without an explicit SetModel call.
+func NewWithLookup(modelFn func() openagent.Model) *Compressor {
+	return &Compressor{modelFn: modelFn}
 }
 
 // SetModel updates the model used for summarization. Safe to call
@@ -39,7 +46,15 @@ func New(m openagent.Model) *Compressor {
 func (c *Compressor) SetModel(m openagent.Model) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.model = m
+	c.modelFn = func() openagent.Model { return m }
+}
+
+// SetModelFn updates the model resolver. Use this for dynamic model
+// lookup (e.g. from a registry that may be updated at runtime).
+func (c *Compressor) SetModelFn(fn func() openagent.Model) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.modelFn = fn
 }
 
 // WithMaxTokens sets a SOFT target for the summary size: the budget is
@@ -61,8 +76,12 @@ func (c *Compressor) WithMaxTokens(n int) *Compressor {
 // ThroughIndex is left at zero (the caller sets it).
 func (c *Compressor) Summarize(ctx context.Context, messages []openagent.Message, previous *openagent.CompressedContext) (*openagent.CompressedContext, error) {
 	c.mu.RLock()
-	model := c.model
+	modelFn := c.modelFn
 	c.mu.RUnlock()
+	var model openagent.Model
+	if modelFn != nil {
+		model = modelFn()
+	}
 	if model == nil {
 		return nil, fmt.Errorf("summarizer: no model configured")
 	}
@@ -89,8 +108,8 @@ func (c *Compressor) Summarize(ctx context.Context, messages []openagent.Message
 	// A provider-supplied RetryAfter (e.g. 429 Retry-After header) overrides
 	// the computed value for that attempt.
 	const (
-		maxRetries    = 2
-		callTimeout   = 90 * time.Second
+		maxRetries  = 2
+		callTimeout = 90 * time.Second
 	)
 	var lastErr error
 	var resp *openagent.ChatCompletionResponse
@@ -248,4 +267,3 @@ func truncateContent(s string, n int) string {
 	}
 	return string(runes[:n-3]) + "..."
 }
-

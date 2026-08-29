@@ -11,6 +11,7 @@ import (
 
 	openagent "github.com/yusheng-g/openagent-go"
 	"github.com/yusheng-g/openagent-go/agent"
+	"github.com/yusheng-g/openagent-go/guard/llm"
 	"github.com/yusheng-g/openagent-go/keyring"
 	"github.com/yusheng-g/openagent-go/rest"
 	"github.com/yusheng-g/openagent-go/sandbox/native"
@@ -33,8 +34,8 @@ import (
 // RunREST starts the REST API server (HTTP + SSE).
 func RunREST(ctx context.Context, cfg *config.Config) error {
 	caps := cfg.Capabilities
-	models, modelInfos := buildModels(cfg.Provider)
-	m := firstModel(models)
+	_, modelInfos := buildModels(cfg.Provider)
+	m := resolveModel(cfg.Model, modelInfos)
 
 	workDir, _ := os.Getwd()
 	sb, err := native.NewWithPolicy(workDir, sandboxPolicy(cfg.Sandbox))
@@ -70,7 +71,14 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 		agent.WithSystemPrompts(resolveProfiles("")...),
 		agent.WithMaxTurns(500),
 	}
-	opts, skillProvider := buildOpts(opts, caps, m)
+	// REST is single-process with no model hot-reload, so a static guard
+	// is correct — no dynamic lookup needed.
+	if caps.OnGuard() && m != nil {
+		g := llm.New(m)
+		opts = append(opts, agent.WithInputGuard(g))
+		opts = append(opts, agent.WithOutputGuard(g.Output()))
+	}
+	opts, skillProvider := buildOpts(opts, caps)
 	agentCfg := agent.New(version.Name, opts...)
 
 	holder, _, telemetryShutdown, err := setupTelemetry(ctx, *cfg)

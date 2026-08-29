@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -481,11 +482,10 @@ func NewAgentServer(cfg *agent.Agent, deps kernel.Deps, store session.Store, mod
 	if s.Models == nil {
 		s.Models = make(map[string]openagent.Model)
 	}
-	// Pick the first model as the default.
-	for id := range s.Models {
-		s.defaultModelID = id
-		break
-	}
+	// Pick the default model deterministically (sorted keys) so the fallback
+	// is stable across runs, not a random map-iteration order. SetDefaultModelID
+	// overrides this with settings "model" when configured.
+	s.defaultModelID = firstModelIDLocked(s.Models)
 	return s
 }
 
@@ -612,11 +612,33 @@ func (s *AgentServer) ModelIDs() []string {
 // sessions referencing the removed model keep their runtime snapshot
 // (rt.Model() returns the last-used model), but new sessions will not
 // be able to select it.
+//
+// If the removed model was the default, the default falls back to the
+// first remaining model (sorted keys, deterministic) so background
+// components (guard/summarizer/extractor) that resolve via
+// GetDefaultModelID don't get a stale key that LookupModel can't find.
 func (s *AgentServer) RemoveModel(key string) {
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
 	delete(s.Models, key)
 	delete(s.modelConfigs, key)
+	if s.defaultModelID == key {
+		s.defaultModelID = firstModelIDLocked(s.Models)
+	}
+}
+
+// firstModelIDLocked returns the first model id by sorted key order, or
+// "" when the registry is empty. Caller must hold modelsMu.
+func firstModelIDLocked(models map[string]openagent.Model) string {
+	ids := make([]string, 0, len(models))
+	for id := range models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) > 0 {
+		return ids[0]
+	}
+	return ""
 }
 
 // lookupModel returns the model registered under id, under modelsMu.
@@ -711,12 +733,10 @@ func (s *AgentServer) switchSessionModel(ss *agentSession, m openagent.Model) {
 	if rt := ss.getRuntime(); rt != nil {
 		rt.SetModel(m)
 	}
-	if s.Summarizer != nil {
-		s.Summarizer.SetModel(m)
-	}
-	if s.Extractor != nil {
-		s.Extractor.SetModel(m)
-	}
+	// Summarizer and extractor use dynamic model lookup (SetModelFn) in
+	// ACP mode, so they pick up registry updates automatically — no need
+	// to call SetModel here. rt.SetModel above updates the session runtime,
+	// which is the per-session model switch.
 }
 
 // ── Client capability helpers ──
