@@ -185,6 +185,10 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	srv.ProfileResolver = func(cwd string) []string {
 		return resolveProfiles(cwd)
 	}
+	// Wire settings-declared MCP servers so the global config is honored in
+	// ACP mode (not just client-advertised ones). mergeMcpServers combines
+	// these with the client's per-session list at connect time.
+	srv.SetSettingsMcpServers(convertMcpServers(cfg.McpServers))
 
 	// Register model configs for runtime_set_model_config.
 	for _, mi := range modelInfos {

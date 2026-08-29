@@ -72,3 +72,76 @@ func TestConnectMCP_Gate(t *testing.T) {
 		t.Error("connectMCP did not spawn process with MCPEnabled=true (file not created)")
 	}
 }
+
+// TestMergeMcpServers_ClientOverridesSettings verifies that a session-level
+// (client-advertised) MCP server shadows a settings.json server of the same
+// name — the client is the more specific source and wins. Settings servers
+// not shadowed are appended.
+func TestMergeMcpServers_ClientOverridesSettings(t *testing.T) {
+	srv := NewAgentServer(agent.New("test"), kernel.Deps{}, nil, nil)
+	srv.MCPEnabled = true
+	srv.SetSettingsMcpServers([]openacp.McpServer{
+		{Name: "shared", URL: "http://settings.example"}, // shadowed by client
+		{Name: "global-only", Command: "/bin/global"},    // kept
+	})
+
+	client := []openacp.McpServer{
+		{Name: "shared", URL: "http://client.example"}, // wins
+		{Name: "client-only", Command: "/bin/client"},  // kept
+	}
+
+	merged := srv.mergeMcpServers(client)
+	if len(merged) != 3 {
+		t.Fatalf("merged len = %d, want 3: %+v", len(merged), merged)
+	}
+
+	byName := make(map[string]openacp.McpServer, len(merged))
+	for _, m := range merged {
+		byName[m.Name] = m
+	}
+	if got := byName["shared"].URL; got != "http://client.example" {
+		t.Errorf("shared server: client did not override settings; got URL %q", got)
+	}
+	if _, ok := byName["global-only"]; !ok {
+		t.Error("settings-only server was dropped")
+	}
+	if _, ok := byName["client-only"]; !ok {
+		t.Error("client-only server was dropped")
+	}
+}
+
+// TestMergeMcpServers_NoSettings verifies the settings list is not consulted
+// when empty — the client list passes through unchanged.
+func TestMergeMcpServers_NoSettings(t *testing.T) {
+	srv := NewAgentServer(agent.New("test"), kernel.Deps{}, nil, nil)
+	client := []openacp.McpServer{{Name: "x", Command: "/bin/x"}}
+	merged := srv.mergeMcpServers(client)
+	if len(merged) != 1 || merged[0].Name != "x" {
+		t.Errorf("merge without settings = %+v; want client passthrough", merged)
+	}
+}
+
+// TestMergeMcpServers_NoClient verifies that settings servers are used when
+// the client advertises none.
+func TestMergeMcpServers_NoClient(t *testing.T) {
+	srv := NewAgentServer(agent.New("test"), kernel.Deps{}, nil, nil)
+	srv.MCPEnabled = true
+	srv.SetSettingsMcpServers([]openacp.McpServer{{Name: "g", Command: "/bin/g"}})
+	merged := srv.mergeMcpServers(nil)
+	if len(merged) != 1 || merged[0].Name != "g" {
+		t.Errorf("merge without client = %+v; want settings passthrough", merged)
+	}
+}
+
+// TestSetSettingsMcpServers_HotSwap verifies the settings list can be
+// replaced concurrently with merge reads (the watcher hot-swaps it).
+func TestSetSettingsMcpServers_HotSwap(t *testing.T) {
+	srv := NewAgentServer(agent.New("test"), kernel.Deps{}, nil, nil)
+	srv.MCPEnabled = true
+	srv.SetSettingsMcpServers([]openacp.McpServer{{Name: "v1"}})
+	srv.SetSettingsMcpServers([]openacp.McpServer{{Name: "v2"}})
+	merged := srv.mergeMcpServers(nil)
+	if len(merged) != 1 || merged[0].Name != "v2" {
+		t.Errorf("after hot-swap: merged = %+v; want v2", merged)
+	}
+}

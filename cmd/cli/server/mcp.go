@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	openagent "github.com/yusheng-g/openagent-go"
+	openacpsdk "github.com/yusheng-g/openagent-go/acp/sdk"
 	"github.com/yusheng-g/openagent-go/mcp"
 	"github.com/yusheng-g/openagent-go/version"
 
@@ -77,4 +78,31 @@ func connectMcpOne(ctx context.Context, client *mcp.Client, cfg config.McpServer
 		env = append(env, os.Environ()...)
 		return client.ConnectStdioWithEnv(ctx, cmd, cfg.Args, env)
 	}
+}
+
+// convertMcpServers translates settings.json MCP server configs (map keyed
+// by name, Env as map[string]string) into the openacp.McpServer protocol
+// type (slice with Name, Env as []EnvVariable). The map key becomes the
+// server Name — the same field connectMCP uses for tool namespacing
+// ("mcp__<name>__<tool>") and duplicate detection.
+func convertMcpServers(servers map[string]config.McpServerConfig) []openacpsdk.McpServer {
+	if len(servers) == 0 {
+		return nil
+	}
+	out := make([]openacpsdk.McpServer, 0, len(servers))
+	for name, c := range servers {
+		envVars := make([]openacpsdk.EnvVariable, 0, len(c.Env))
+		for k, v := range c.Env {
+			envVars = append(envVars, openacpsdk.EnvVariable{Name: k, Value: v})
+		}
+		out = append(out, openacpsdk.McpServer{
+			Name:    name,
+			Type:    c.Type,
+			Command: c.Command,
+			Args:    c.Args,
+			Env:     envVars,
+			URL:     c.URL,
+		})
+	}
+	return out
 }

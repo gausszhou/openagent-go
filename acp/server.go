@@ -92,6 +92,13 @@ type AgentServer struct {
 	// NewAgentServer); set false to disable MCP tool integration.
 	MCPEnabled bool
 
+	// settingsMcpServers are MCP servers declared in settings.json (the
+	// global config). They are merged with client-advertised servers
+	// (req.McpServers) at session create/load/resume — client wins on name
+	// conflict. Guarded by mcpMu so the settings watcher can hot-swap them.
+	settingsMcpServers []openacp.McpServer
+	mcpMu              sync.RWMutex
+
 	// Plugin manager and model config backup for runtime_set_model_config.
 	PluginMgr    *wasm.Manager
 	modelConfigs map[string]ModelConfig // "provider/modelID" → original config
@@ -928,6 +935,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 	if !s.MCPEnabled {
 		return nil, nil
 	}
+	servers = s.mergeMcpServers(servers)
 	client := mcp.NewClient(s.AgentName, s.AgentVersion)
 	var sessions []*mcp.Session
 	var tools []openagent.Tool
@@ -935,7 +943,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 	for _, cfg := range servers {
 		sess, err := s.connectOneMCP(ctx, client, cfg)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "acp: MCP connect %q failed: %v\n", cfg.Name, err)
+			mcpWarn("connect", cfg.Name, err)
 			continue
 		}
 		sessions = append(sessions, sess)
@@ -943,7 +951,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 		// across servers and self-describing to the model.
 		st, err := sess.Named(cfg.Name).Tools(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "acp: MCP list tools %q failed: %v\n", cfg.Name, err)
+			mcpWarn("list tools", cfg.Name, err)
 			continue
 		}
 		for _, t := range st {
@@ -951,7 +959,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 			if owner, dup := seen[name]; dup {
 				// Two servers exposing the same tool name would make
 				// tool lookup ambiguous — skip the later one.
-				fmt.Fprintf(os.Stderr, "acp: MCP tool %q from server %q duplicates %q — skipped\n", name, cfg.Name, owner)
+				mcpWarnDup(name, cfg.Name, owner)
 				continue
 			}
 			seen[name] = cfg.Name
@@ -977,11 +985,67 @@ func (s *AgentServer) connectOneMCP(ctx context.Context, client *mcp.Client, cfg
 	}
 }
 
+// mergeMcpServers merges settings-declared MCP servers with client-advertised
+// ones. Client servers win on name conflict (the client is the more specific
+// source — it knows the session's intent). Settings servers fill in the
+// global defaults the client didn't override.
+func (s *AgentServer) mergeMcpServers(client []openacp.McpServer) []openacp.McpServer {
+	s.mcpMu.RLock()
+	settings := s.settingsMcpServers
+	s.mcpMu.RUnlock()
+	if len(settings) == 0 {
+		return client
+	}
+	seen := make(map[string]bool, len(client)+len(settings))
+	merged := make([]openacp.McpServer, 0, len(client)+len(settings))
+	// Client first so it wins on conflict.
+	for _, m := range client {
+		seen[m.Name] = true
+		merged = append(merged, m)
+	}
+	for _, m := range settings {
+		if !seen[m.Name] {
+			merged = append(merged, m)
+		}
+	}
+	return merged
+}
+
+// SetSettingsMcpServers replaces the settings-declared MCP servers. Called
+// at startup and by the settings watcher on hot-reload. Safe to call
+// concurrently with session creation (mergeMcpServers takes the read lock).
+// Existing sessions keep their connected MCP tools; only new sessions pick
+// up the change.
+func (s *AgentServer) SetSettingsMcpServers(servers []openacp.McpServer) {
+	s.mcpMu.Lock()
+	s.settingsMcpServers = servers
+	s.mcpMu.Unlock()
+}
+
 // disconnectMCP closes all MCP connections.
 func (s *AgentServer) disconnectMCP(sessions []*mcp.Session) {
 	for _, sess := range sessions {
 		_ = sess.Close()
 	}
+}
+
+// mcpWarn logs an MCP connection/setup failure to BOTH stderr (the ACP
+// control pipe — surfaced to the client via Session.Stderr) and slog (the
+// persisted log file). A connect failure is non-fatal (connectMCP skips
+// the server and continues), but the user needs to see it in both places:
+// stderr for immediate feedback in the client, slog for post-mortem in the
+// server log.
+func mcpWarn(op, name string, err error) {
+	msg := fmt.Sprintf("acp: MCP %s %q failed: %v", op, name, err)
+	fmt.Fprintln(os.Stderr, msg)
+	slog.Warn("mcp setup failed", "op", op, "server", name, "error", err)
+}
+
+// mcpWarnDup logs a duplicate tool-name skip (same dual-write rationale).
+func mcpWarnDup(tool, server, owner string) {
+	msg := fmt.Sprintf("acp: MCP tool %q from server %q duplicates %q — skipped", tool, server, owner)
+	fmt.Fprintln(os.Stderr, msg)
+	slog.Warn("mcp tool duplicate skipped", "tool", tool, "server", server, "owner", owner)
 }
 
 func (s *AgentServer) putSession(id openacp.SessionId, ss *agentSession) {

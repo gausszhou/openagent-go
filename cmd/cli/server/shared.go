@@ -635,6 +635,14 @@ func (sw *settingsWatcher) reload(ctx context.Context) {
 		sw.reconfigureModels(newCfg)
 	}
 
+	// MCP servers (ACP only). Settings servers are merged with client-
+	// advertised ones at session connect; hot-swapping affects new sessions
+	// only (existing sessions keep their connected tools).
+	if sw.srv != nil && !reflect.DeepEqual(sw.prev.McpServers, newCfg.McpServers) {
+		sw.srv.SetSettingsMcpServers(convertMcpServers(newCfg.McpServers))
+		slog.Info("settings reloaded: mcp servers", "count", len(newCfg.McpServers))
+	}
+
 	sw.prev = &newCfg
 	slog.Info("settings reloaded")
 }
