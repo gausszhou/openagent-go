@@ -96,7 +96,7 @@ func cftExecutableRelPath() string {
 // resolveChromePath returns the Chrome binary to use for chromedp.
 //
 // Resolution order:
-//  1. OPENAGENT_CHROME_PATH env var (operator override).
+//  1. CHROME_PATH env var (operator override).
 //  2. System Chrome at standard install paths (no download needed).
 //  3. Chrome-for-Testing downloaded into the cache dir.
 //
@@ -104,7 +104,7 @@ func cftExecutableRelPath() string {
 // cftResolveOnce); subsequent calls reuse the resolved path.
 func resolveChromePath(ctx context.Context) (string, error) {
 	// 1. Operator override.
-	if p := strings.TrimSpace(os.Getenv("OPENAGENT_CHROME_PATH")); p != "" {
+	if p := strings.TrimSpace(os.Getenv("CHROME_PATH")); p != "" {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
@@ -116,11 +116,20 @@ func resolveChromePath(ctx context.Context) (string, error) {
 	}
 
 	// 3. CfT download (once per process).
+	// Chrome-for-Testing only publishes linux64 (amd64), not linux/arm64 —
+	// on arm64 we can't auto-download, so surface an actionable install
+	// command. The error text is consumed by the agent (which can run the
+	// shell tool to install), so it must contain a ready-to-run command,
+	// not just a hint.
+	if cftPlatform() == "" {
+		return "", fmt.Errorf("no Chrome/Chromium binary found on %s/%s and auto-download is unsupported on this platform. Install Chromium then retry, e.g. run: sudo apt-get install -y chromium  (Debian/Ubuntu)  or  sudo dnf install -y chromium  (Fedora/RHEL). Alternatively set CHROME_PATH=/path/to/chromium",
+			runtime.GOOS, runtime.GOARCH)
+	}
 	cftResolveOnce.Do(func() {
 		cftResolvedPath, cftResolveErr = downloadChromeForTesting(ctx)
 	})
 	if cftResolveErr != nil {
-		return "", fmt.Errorf("chrome not found and CfT download failed: %w; set OPENAGENT_CHROME_PATH or install Chrome", cftResolveErr)
+		return "", fmt.Errorf("chrome not found and CfT download failed: %w. Install Chromium then retry, e.g. run: sudo apt-get install -y chromium  (Debian/Ubuntu)  or  sudo dnf install -y chromium  (Fedora/RHEL). Alternatively set CHROME_PATH=/path/to/chromium", cftResolveErr)
 	}
 	return cftResolvedPath, nil
 }
