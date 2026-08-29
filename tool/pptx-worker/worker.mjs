@@ -119,9 +119,8 @@ async function loadBuildFunction(scriptPath) {
 function createPresentation() {
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_WIDE';
-  pptx.author = 'OpenAgent';
-  pptx.company = 'OpenAgent';
-  pptx.subject = 'Generated with OpenAgent';
+  // Leave author/company/subject unset — the deck is the user's product;
+  // don't stamp it with tool branding. PptxGenJS defaults to empty strings.
   return pptx;
 }
 

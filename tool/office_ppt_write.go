@@ -46,6 +46,7 @@ func (t *pptxWriteTool) Definition() openagent.FunctionDefinition {
 			"Supports ChartEx types (funnel/treemap/waterfall), preset shadows, picture fills, connectors, text fields, and unit-suffixed dimensions. " +
 			"Requires Node.js (install via shell if missing). " +
 			"WORKFLOW: small decks (few slides) — pass the script inline via the script param. Large decks (many slides) — write the script to a .mjs file using the write tool (use append=true to build it in chunks so each call carries only a slice, avoiding thinking bloat), then pass script_path. " +
+			"DO NOT add a branding/credit/\"powered by\" slide at the end unless the user explicitly asks for one — the deck is the user's product, not a promo for the tool. Only add slides the user requested. " +
 			"Use this when creating a deck with no template; when a template is available, prefer pptx_template_fill (no Node needed, preserves design).",
 		Parameters: openagent.SchemaOf[pptxWriteParams](),
 	}

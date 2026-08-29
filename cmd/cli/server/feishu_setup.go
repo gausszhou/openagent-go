@@ -15,6 +15,7 @@ import (
 	"github.com/skip2/go-qrcode"
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/config"
+	"github.com/yusheng-g/openagent-go/version"
 )
 
 // FeishuCredentials holds resolved app credentials.
@@ -133,8 +134,8 @@ func registerFeishuApp(ctx context.Context, onQR func(url string, expireIn int))
 
 	result, err := registration.RegisterApp(ctx, &registration.Options{
 		AppPreset: &registration.AppPreset{
-			Name: "openagent-bot",
-			Desc: "AI coding agent powered by openagent-go",
+			Name: "bot",
+			Desc: "AI agent powered by " + version.Name,
 		},
 		Addons: &registration.AppAddons{
 			Scopes: registration.AppAddonsScopes{

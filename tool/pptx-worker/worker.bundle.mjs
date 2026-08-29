@@ -45399,9 +45399,6 @@ async function loadBuildFunction(scriptPath) {
 function createPresentation() {
   const pptx = new pptxgen_es_default();
   pptx.layout = "LAYOUT_WIDE";
-  pptx.author = "OpenAgent";
-  pptx.company = "OpenAgent";
-  pptx.subject = "Generated with OpenAgent";
   return pptx;
 }
 async function generateDeck(spec) {
