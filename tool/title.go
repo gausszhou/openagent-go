@@ -28,6 +28,7 @@ func ToolTitle(name string, args string) string {
 		AgentID     string `json:"agent_id"`
 		Action      string `json:"action"`
 		Key         string `json:"key"`
+		Append      bool   `json:"append"`
 	}
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
 		return name
@@ -45,9 +46,16 @@ func ToolTitle(name string, args string) string {
 			}
 			return name + " " + base
 		}
-	case "edit", "write", "ls":
+	case "edit", "ls":
 		if params.Path != "" {
 			return name + " " + params.Path
+		}
+	case "write":
+		if params.Path != "" {
+			if params.Append {
+				return "append " + params.Path
+			}
+			return "write " + params.Path
 		}
 	case "feishu_sendfile":
 		if params.Path != "" {
