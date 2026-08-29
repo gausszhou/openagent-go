@@ -183,7 +183,7 @@ func NewWriteFile(workDir string) *WriteFile {
 func (t *WriteFile) Definition() openagent.FunctionDefinition {
 	return openagent.FunctionDefinition{
 		Name:        "write",
-		Description: "Write content to a file. Creates parent directories as needed.",
+		Description: "Write content to a file. Creates parent directories as needed. Set append=true to append to an existing file instead of overwriting — use this to build large files (e.g. long scripts) in chunks so each call carries only the new content.",
 		Parameters:  openagent.SchemaOf[WriteFileParams](),
 	}
 }
@@ -207,14 +207,40 @@ func (t *WriteFile) Execute(ctx context.Context, args json.RawMessage) *openagen
 	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
 		return openagent.ErrorResult(fmt.Errorf("write: %w", err), false, "")
 	}
-	if err := writeFilePreservingMode(abs, []byte(params.Content)); err != nil {
-		return openagent.ErrorResult(fmt.Errorf("write: %w", err), false, "")
+
+	var wroteBytes int
+	if params.Append {
+		// Append: open existing (or create) and add to the end. Preserve
+		// the existing file mode; for a new file default to 0644.
+		var f *os.File
+		if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
+			f, err = os.OpenFile(abs, os.O_WRONLY|os.O_APPEND, info.Mode())
+		} else {
+			f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		}
+		if err != nil {
+			return openagent.ErrorResult(fmt.Errorf("write (append): %w", err), false, "")
+		}
+		n, writeErr := f.WriteString(params.Content)
+		f.Close()
+		if writeErr != nil {
+			return openagent.ErrorResult(fmt.Errorf("write (append): %w", writeErr), false, "")
+		}
+		wroteBytes = n
+	} else {
+		if err := writeFilePreservingMode(abs, []byte(params.Content)); err != nil {
+			return openagent.ErrorResult(fmt.Errorf("write: %w", err), false, "")
+		}
+		wroteBytes = len(params.Content)
 	}
 
 	info, _ := os.Stat(abs)
 	size := int64(0)
 	if info != nil {
 		size = info.Size()
+	}
+	if params.Append {
+		return &openagent.ToolResult{Content: fmt.Sprintf("Appended %d bytes to %s (file now %d bytes)", wroteBytes, params.Path, size)}
 	}
 	return &openagent.ToolResult{Content: fmt.Sprintf("Wrote %s (%d bytes)", params.Path, size)}
 }
@@ -386,6 +412,7 @@ type ReadFileParams struct {
 type WriteFileParams struct {
 	Path    string `json:"path" jsonschema:"description=File path"`
 	Content string `json:"content" jsonschema:"description=Content to write to the file"`
+	Append  bool   `json:"append,omitempty" jsonschema:"description=Append to the end of an existing file instead of overwriting (default: false, overwrite). Use this to build large files in chunks without passing the full content every call."`
 }
 
 // ListDirParams are the arguments to ls. Path is optional — empty lists
