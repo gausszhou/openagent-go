@@ -264,6 +264,14 @@ func buildTools(sandbox *native.Sandbox, workDir string, toolList []string) []op
 		// Go) + pptx_write (Node.js PptxGenJS, embedded worker bundle).
 		tools = append(tools, opentool.NewOfficeTools(workDir)...)
 	}
+	if enabled["settings"] {
+		// Server-level config tool: read/modify settings.json atomically.
+		// Not cwd-scoped (settings.json is global), but built here so it
+		// follows the same capability-gated assembly as other tools.
+		// Classified Dangerous (not read-only) — settings.json carries
+		// apikeys/secrets, so even get/list routes through the approver.
+		tools = append(tools, newSettingsTool())
+	}
 	return tools
 }
 

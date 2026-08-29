@@ -22,6 +22,11 @@ import (
 // SetupLog stores the writer here; reconfigureLogLevel reads it.
 var logWriter atomic.Pointer[io.Writer]
 
+// logFilePath holds the resolved log file path (empty when logging is
+// discarded). SetupLog stores it; the settings tool reads it so the agent
+// sees the concrete path the server is writing to, not a re-derivation.
+var logFilePath atomic.Pointer[string]
+
 // SetupLog configures slog + log package output. Writes to a rotated log
 // file when cfg.File is set; otherwise discards log output silently.
 //
@@ -52,6 +57,7 @@ func SetupLog(cfg config.LogConfig) (func(), error) {
 	// Store the writer and level for reconfigureLogLevel.
 	var w io.Writer = mw
 	logWriter.Store(&w)
+	logFilePath.Store(&cfg.File)
 
 	// Use a level-switchable handler so reconfigureLogLevel can change
 	// the level without rebuilding the handler (and losing the writer).

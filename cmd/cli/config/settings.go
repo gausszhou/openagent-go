@@ -230,6 +230,17 @@ func mutateSettings(fn func(doc map[string]any) error) error {
 		if err != nil {
 			return fmt.Errorf("settings: marshal result: %w", err)
 		}
+		// Validate BEFORE writing: the mutated doc must still parse into
+		// Config without type errors (e.g. log.level must stay a string,
+		// sandbox.enabled a bool). A type mismatch here means the mutation
+		// would produce a config that fails to reload (degraded defaults)
+		// or fails to start on next boot (log.Fatalf). Reject it now so
+		// the on-disk file is never left in a semantically broken state.
+		// Unknown keys are tolerated (Config uses omitempty + no DisallowUnknownFields).
+		var probe Config
+		if err := json.Unmarshal(newData, &probe); err != nil {
+			return fmt.Errorf("settings: validation failed (would break config parse): %w", err)
+		}
 		return json.Unmarshal(newData, &raw)
 	})
 }

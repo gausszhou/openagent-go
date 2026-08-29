@@ -39,7 +39,7 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 
 	workDir, _ := os.Getwd()
 	sb, err := native.NewWithPolicy(workDir, sandboxPolicy(cfg.Sandbox))
-	restToolList := []string{"shell", "read", "write", "edit", "ls", "grep", "websearch", "webfetch"}
+	restToolList := []string{"shell", "read", "write", "edit", "ls", "grep", "websearch", "webfetch", "settings"}
 	if caps.OnBrowser() {
 		restToolList = append(restToolList, "browser")
 	}

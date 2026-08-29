@@ -21,7 +21,7 @@ func isolate(t *testing.T) string {
 func TestUpdateSettingsPreservesOtherFields(t *testing.T) {
 	p := isolate(t)
 	existing := map[string]any{
-		"provider":            map[string]any{"openai": map[string]any{"api_key": "sk-old"}},
+		"provider":             map[string]any{"openai": map[string]any{"api_key": "sk-old"}},
 		"unknown_future_field": map[string]any{"keep": "me"},
 	}
 	data, _ := json.MarshalIndent(existing, "", "  ")
@@ -70,6 +70,46 @@ func TestUpdateSettingsAbortsOnError(t *testing.T) {
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Fatalf("settings file created despite aborted update: %v", err)
+	}
+}
+
+// SetSetting rejects type-mismatched values BEFORE writing to disk so the
+// on-disk file is never left in a semantically broken state (one that would
+// fail to reload or fail to start on next boot). log.level is a string;
+// assigning a number must be rejected and the file must not change.
+func TestSetSettingRejectsTypeMismatch(t *testing.T) {
+	p := isolate(t)
+	// Seed a valid file first.
+	if err := SetSetting("log.level", "info"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before, _ := os.ReadFile(p)
+
+	// Type mismatch: log.level is a string, 123 is a number.
+	if err := SetSetting("log.level", "123"); err == nil {
+		t.Fatal("expected type-mismatch validation error, got nil")
+	}
+
+	// File must be unchanged (reject happened before write).
+	after, _ := os.ReadFile(p)
+	if string(before) != string(after) {
+		t.Fatalf("file changed despite validation rejection:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// SetSetting accepts a valid value (correct type) and writes it.
+func TestSetSettingAcceptsValidValue(t *testing.T) {
+	isolate(t)
+	if err := SetSetting("log.level", "debug"); err != nil {
+		t.Fatalf("valid set failed: %v", err)
+	}
+	got, err := GetSetting("log.level")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	// GetSetting returns pretty-printed JSON; "debug" serializes as "debug".
+	if got != `"debug"` {
+		t.Fatalf("got %q, want %q", got, `"debug"`)
 	}
 }
 

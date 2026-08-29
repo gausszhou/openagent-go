@@ -26,6 +26,8 @@ func ToolTitle(name string, args string) string {
 		Template    string `json:"template"`
 		Task        string `json:"task"`
 		AgentID     string `json:"agent_id"`
+		Action      string `json:"action"`
+		Key         string `json:"key"`
 	}
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
 		return name
@@ -124,6 +126,14 @@ func ToolTitle(name string, args string) string {
 		}
 		if params.AgentID != "" {
 			return name + " " + params.AgentID
+		}
+	case "settings":
+		// settings <action> [key] — e.g. "settings set telemetry.endpoint"
+		if params.Action != "" {
+			if params.Key != "" {
+				return name + " " + params.Action + " " + params.Key
+			}
+			return name + " " + params.Action
 		}
 	}
 	// Sub-agent delegation tools (explore, general, user-defined): the tool

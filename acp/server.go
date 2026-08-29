@@ -2209,9 +2209,13 @@ func (s *AgentServer) buildRuntimeForSession(sid openacp.SessionId, ss *agentSes
 	deps.HumanApprover = nil
 	// Session-mode tools are excluded from sub-agent tool sets: their
 	// callbacks are session-bound and would be nil in the child runtime.
+	// settings is excluded too — settings.json is global config (may carry
+	// apikeys and other secrets); only the parent agent (in direct contact
+	// with the user) should read or modify it, never a delegated sub-agent.
 	deps.SubAgentExcludeTools = []string{
 		"plan_create", "plan_update",
 		"enter_plan_mode", "exit_plan_mode",
+		"settings",
 	}
 	// Share the server-level persisted approval memory so the policy
 	// chain's Memory layer recalls "always allow" decisions across turns

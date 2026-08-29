@@ -209,7 +209,7 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	}
 
 	policy := sandboxPolicy(cfg.Sandbox)
-	baseToolList := []string{"shell", "read", "write", "ls", "grep", "websearch", "webfetch"}
+	baseToolList := []string{"shell", "read", "write", "ls", "grep", "websearch", "webfetch", "settings"}
 	if caps.OnBrowser() {
 		baseToolList = append(baseToolList, "browser")
 	}

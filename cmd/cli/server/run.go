@@ -48,7 +48,7 @@ func RunCLI(ctx context.Context, cfg *config.Config, message string) error {
 	workDir, _ := os.Getwd()
 	policy := sandboxPolicy(cfg.Sandbox)
 	sb, err := native.NewWithPolicy(workDir, policy)
-	runToolList := []string{"shell", "read", "write", "ls", "grep", "websearch", "webfetch"}
+	runToolList := []string{"shell", "read", "write", "ls", "grep", "websearch", "webfetch", "settings"}
 	if caps.OnBrowser() {
 		runToolList = append(runToolList, "browser")
 	}
