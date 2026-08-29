@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -147,6 +148,53 @@ func (p *DefaultResultPolicy) Apply(ctx context.Context, session Session, result
 		return result
 	}
 
+	// Guard against the artifact-of-artifact cascade: when "read" targets
+	// a path under ArtifactRoot() and the result exceeds the threshold,
+	// truncate IN PLACE instead of spilling to a new artifact file.
+	//
+	// Why in-place and not "skip truncation entirely": the artifact file
+	// can be much larger than the model's input limit (a 576 KB artifact
+	// vs a 307 K-char API cap). Skipping truncation lets the full content
+	// into the prompt, which the model API rejects with a 400 "prompt
+	// length exceeds" — the model cannot read the file at all. In-place
+	// truncation returns a token-bounded preview (≤ threshold) plus a
+	// pointer to the SAME artifact file (FileRef), so the model can page
+	// through with read line=N+1. No new artifact file is created, so the
+	// cascade (artifact A → read A → artifact B → ...) is broken.
+	//
+	// Why only "read" (not "grep"): see artifactReadPath. grep's FileRef
+	// would point at the grepped file, not the match list — the model
+	// could not page correctly. grep overflow is also rare and
+	// self-terminating.
+	if artifactPath, startLine, hasPrefix := p.artifactReadPath(result.Metadata); artifactPath != "" {
+		origBytes := len(result.Content)
+		preview, lines := truncatePreview(modelID, result.Content, threshold)
+		// truncatePreview counts every '\n' in the truncated Content, but
+		// read inserts a "[lines N-M, total, bytes]:\n" summary prefix when
+		// line>1 or limit>0 (tool/file.go). That prefix line is NOT file
+		// data — counting it would make the continuation hint advance past
+		// real content by one line per page, permanently skipping a line
+		// each turn (off-by-one pagination). Subtract it when present.
+		dataLines := lines
+		if hasPrefix && dataLines > 0 {
+			dataLines--
+		}
+		continueLine := startLine + dataLines
+		result.Content = preview + fmt.Sprintf(
+			"\n... [%d lines shown of a larger artifact file (starting at line %d); to continue, call read with path=%s line=%d]",
+			dataLines, startLine, artifactPath, continueLine)
+		result.Truncated = true
+		result.FileRef = artifactPath
+		if result.Metadata == nil {
+			result.Metadata = map[string]any{}
+		}
+		// Match the spill path semantics: artifact_bytes is the ORIGINAL
+		// output size, not the truncated preview+hint length, so
+		// observers/logs tracking true output size agree across paths.
+		result.Metadata["artifact_bytes"] = origBytes
+		return result
+	}
+
 	dir := filepath.Join(ArtifactRoot(), "sess-"+SanitizeName(session.ID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		// Truncation failed: log instead of silently flooding the model
@@ -177,6 +225,174 @@ func (p *DefaultResultPolicy) Apply(ctx context.Context, session Session, result
 	}
 	result.Metadata["artifact_bytes"] = origBytes
 	return result
+}
+
+// artifactReadPath returns the absolute artifact-file path, the 1-based start
+// line of the read, and whether read will have inserted its "[lines ...]:"
+// summary prefix (true when line>1 or limit>0), when the tool call that
+// produced this result is a "read" targeting a path under ArtifactRoot().
+// It returns ("",0,false) otherwise. The runtime stamps "tool_name" and
+// "tool_args" into result.Metadata before calling Apply; when absent (e.g. a
+// third-party policy or a tool that clears metadata) the guard returns
+// ("",0,false) and truncation proceeds as usual.
+//
+// Only "read" is guarded, not "grep":
+//   - The cascade's real trigger is read (shell big output → artifact A →
+//     read A → artifact B → ...). grep output is matching lines, which is
+//     a subset of the file and almost always under threshold; a wide
+//     grep (".*") that does overflow naturally terminates (each step's
+//     output ⊂ the file), unlike read's identity-copy cascade.
+//   - read's FileRef semantics are exact after in-place truncation: the
+//     truncated Content is a prefix of the file (from the start line)
+//     and FileRef points at that same file, so the model can continue
+//     with read line=startLine+linesShown. grep's FileRef would point
+//     at the file it grepped, not at the match list — misleading the
+//     model if it tries to continue.
+//
+// hasPrefix is returned so the caller can subtract the prefix line from the
+// line count when computing the continuation line number — read inserts the
+// prefix unconditionally when line>1 or limit>0, and counting it as file
+// data would advance the hint past real content (off-by-one per page).
+//
+// Path resolution uses filepath.Abs so relative paths like
+// "../../tmp/openagent/..." are caught — the old hooks/artifact guard
+// used a raw strings.HasPrefix that missed relative paths.
+func (p *DefaultResultPolicy) artifactReadPath(meta map[string]any) (path string, startLine int, hasPrefix bool) {
+	if meta == nil {
+		return "", 0, false
+	}
+	name, _ := meta["tool_name"].(string)
+	if name != "read" {
+		return "", 0, false
+	}
+	raw, _ := meta["tool_args"].(json.RawMessage)
+	if len(raw) == 0 {
+		return "", 0, false
+	}
+	var params struct {
+		Path  string `json:"path"`
+		Line  int    `json:"line"`
+		Limit int    `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return "", 0, false
+	}
+	if params.Path == "" {
+		return "", 0, false
+	}
+	abs, err := filepath.Abs(filepath.Clean(params.Path))
+	if err != nil {
+		return "", 0, false
+	}
+	root := ArtifactRoot()
+	if strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		// read's Line is 1-based; 0/unspecified means 1. Normalize so
+		// the continuation hint (startLine + linesShown) is correct.
+		start := params.Line
+		if start <= 0 {
+			start = 1
+		}
+		// read inserts its "[lines N-M, total, bytes]:\n" prefix exactly
+		// when line>1 or limit>0 (tool/file.go). Mirror that condition so
+		// the caller can discount the prefix line from the data line count.
+		return abs, start, params.Line > 1 || params.Limit > 0
+	}
+	return "", 0, false
+}
+
+// truncatePreview returns a prefix of s that fits within maxTokens (measured
+// with the same tokenizer the runner uses), cut at a line boundary so the
+// caller can report an exact "shown N lines, continue at line N+1" hint.
+// Also returns the number of complete lines in the preview.
+//
+// Used by Apply when "read" targets an existing artifact file: instead of
+// spilling the content to a NEW artifact file (which would restart the
+// cascade), we give the model a bounded preview of the SAME file and let
+// it page with read line=N+1. The preview is capped at the result-policy
+// threshold (context window × artifactFraction %), which is far below the
+// model's input limit, so the prompt never overflows.
+//
+// Algorithm: estimate a byte cutoff from the token ratio, snap left to the
+// previous '\n' (line boundary), then verify with CountTokens. If still
+// over budget (the ratio estimate is coarse for non-ASCII), halve and
+// re-snap until it fits — at most ~log2(len) iterations.
+func truncatePreview(modelID, s string, maxTokens int) (preview string, lines int) {
+	if maxTokens <= 0 || len(s) == 0 {
+		return "", 0
+	}
+	if CountTokens(modelID, s) <= maxTokens {
+		// Fast path: entire content fits. NOTE: this branch is currently
+		// unreachable from Apply, which pre-filters at result.go:147
+		// (CountTokens <= threshold → early return) before calling
+		// truncatePreview. The +1 here vs the no-+1 in the truncation
+		// path below is intentional but semantically inconsistent: this
+		// path counts the trailing line without a '\n' (the whole content
+		// is shown), while the truncation path counts only complete lines
+		// (cut at a '\n', no trailing partial line). If a future caller
+		// reaches this path, reconcile the lines semantic — the caller
+		// uses `lines` to compute a continuation line number where the
+		// no-+1 "complete lines only" meaning is required.
+		return s, strings.Count(s, "\n") + 1
+	}
+	// Initial estimate: bytes ≈ tokens × (len/totalTokens), with 10%
+	// headroom for the ratio's coarseness on multi-byte text.
+	totalTokens := CountTokens(modelID, s)
+	if totalTokens <= 0 {
+		totalTokens = 1
+	}
+	cutoff := len(s) * maxTokens / totalTokens * 9 / 10
+	if cutoff < 1 {
+		cutoff = 1
+	}
+	// Snap to the previous line boundary (keep complete lines only).
+	snapToLine := func(c int) int {
+		if c >= len(s) {
+			c = len(s)
+		}
+		if idx := strings.LastIndexByte(s[:c], '\n'); idx >= 0 {
+			return idx + 1 // first byte after the newline
+		}
+		return 0 // no line boundary found
+	}
+	cutoff = snapToLine(cutoff)
+	// Verify and halve if the estimate was too high.
+	for cutoff > 0 && CountTokens(modelID, s[:cutoff]) > maxTokens {
+		cutoff = snapToLine(cutoff / 2)
+	}
+	if cutoff > 0 {
+		return s[:cutoff], strings.Count(s[:cutoff], "\n")
+	}
+	// No line boundary found in the budget: the content is a single line
+	// longer than the token budget (minified JSON, base64, a huge log
+	// line). Returning ("",0) would give the model "0 lines shown" and
+	// force a re-read of the same line → infinite loop. Fall back to a
+	// byte-level cut so the preview is non-empty and the model can make
+	// progress. The cut may split a token/multibyte rune — we accept
+	// that over showing nothing, because the alternative is a livelock
+	// where the file content is never visible at all.
+	//
+	// Byte-level fallback: find the largest byte count ≤ the initial
+	// estimate that fits the token budget, without requiring a newline.
+	cutoff = len(s) * maxTokens / totalTokens * 9 / 10
+	if cutoff < 1 {
+		cutoff = 1
+	}
+	if cutoff > len(s) {
+		cutoff = len(s)
+	}
+	for cutoff > 0 && CountTokens(modelID, s[:cutoff]) > maxTokens {
+		cutoff /= 2
+	}
+	if cutoff == 0 {
+		cutoff = 1 // never return empty for non-empty input
+	}
+	// Report 1 line: there is no newline, but the model sees one logical
+	// line of content (truncated). The continuation hint will re-suggest
+	// the same start line — read has no byte-offset paging, so the model
+	// re-reads the same line and truncatePreview again takes the prefix.
+	// This is not a clean page (the line repeats on re-read), but it
+	// avoids the livelock and the content is at least visible.
+	return s[:cutoff], 1
 }
 
 // maxArtifactLine is the line length cap applied when spilling an

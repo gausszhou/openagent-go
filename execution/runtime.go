@@ -284,7 +284,30 @@ func (e *ExecutionRuntime) executeOnce(ctx context.Context, session openagent.Se
 
 	// Result policy (truncation) — after hooks so redaction happens first.
 	if e.cfg.ResultPolicy != nil && result != nil {
+		// Stamp tool identity into metadata so DefaultResultPolicy can
+		// detect reads of its own artifact files and skip re-truncation
+		// (prevents the artifact-of-artifact cascade: shell output →
+		// artifact A → read A → artifact B → ...). Tools may already
+		// populate Metadata (exit_code, mime, ...); init only when nil
+		// and overwrite just these two policy-internal keys.
+		//
+		// The keys are deleted immediately after Apply returns so they
+		// never flow downstream: tool_args is the raw tool argument JSON
+		// (shell command text, file paths, ...) and redaction runs BEFORE
+		// this stamp, so it cannot scrub these keys. Leaving them in
+		// metadata would leak sensitive content through the ACP
+		// JSON-RPC result and observer/log spans.
+		if result.Metadata == nil {
+			result.Metadata = map[string]any{}
+		}
+		result.Metadata["tool_name"] = call.Function.Name
+		result.Metadata["tool_args"] = args
 		result = e.cfg.ResultPolicy.Apply(toolCtx, session, result)
+		delete(result.Metadata, "tool_name")
+		delete(result.Metadata, "tool_args")
+		if len(result.Metadata) == 0 {
+			result.Metadata = nil
+		}
 	}
 
 	return toolResultMessage(call, result)
