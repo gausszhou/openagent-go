@@ -66,6 +66,36 @@ type TokenizerModeler interface {
 	TokenizerModel() string
 }
 
+// ModelLister is an optional interface for Models backed by a provider
+// that exposes a model discovery endpoint (OpenAI-compatible /models:
+// OpenAI, OpenRouter, Together, Groq, Ollama, ...). ListModels returns the
+// models available on the provider so the caller can auto-register them
+// instead of requiring every model ID in settings.json.
+//
+// The endpoint path is relative to the Model's configured baseURL — the
+// caller decides the /v1 prefix, not this interface. Fields beyond ID
+// (max input/output tokens, pricing) come from the built-in lookup table;
+// providers that include extra fields in the response (OpenRouter's
+// context_length / pricing) override the table.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]AvailableModel, error)
+}
+
+// AvailableModel describes a model discovered via the provider's /models
+// endpoint. It mirrors the fields a manually-configured ModelConfig carries
+// so a discovered model can be registered with the same completeness as a
+// hand-written one. Zero values mean "unknown" — the caller falls back to
+// defaults.
+type AvailableModel struct {
+	ID                       string
+	OwnedBy                  string
+	MaxInputTokens           int
+	MaxOutputTokens          int
+	InputCostPerMillion      float64
+	InputCacheCostPerMillion float64
+	OutputCostPerMillion     float64
+}
+
 // ── Streaming types ──
 
 // StreamReader is an iterator over response deltas.

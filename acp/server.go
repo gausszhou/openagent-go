@@ -141,14 +141,15 @@ func (s *AgentServer) defaultMode() string {
 // ModelConfig stores the original apiKey/baseURL for a registered model,
 // so SetModel can preserve values when only model_id changes.
 type ModelConfig struct {
-	Provider               string
-	ModelID                string
-	APIKey                 string
-	BaseURL                string
-	MaxOutputTokens        int
-	InputCostPerToken      float64
-	InputCacheCostPerToken float64
-	OutputCostPerToken     float64
+	Provider                 string
+	ModelID                  string
+	APIKey                   string
+	BaseURL                  string
+	MaxInputTokens           int
+	MaxOutputTokens          int
+	InputCostPerMillion      float64
+	InputCacheCostPerMillion float64
+	OutputCostPerMillion     float64
 }
 
 // agentSession holds per-session runtime state.
@@ -584,10 +585,11 @@ func (s *AgentServer) SetModel(provider, modelID, apiKey, baseURL string, maxInp
 	s.Models[key] = m
 	s.modelConfigs[key] = ModelConfig{
 		Provider: provider, ModelID: modelID, APIKey: apiKey, BaseURL: baseURL,
-		MaxOutputTokens:        mot,
-		InputCostPerToken:      old.InputCostPerToken,
-		InputCacheCostPerToken: old.InputCacheCostPerToken,
-		OutputCostPerToken:     old.OutputCostPerToken,
+		MaxInputTokens:           cw,
+		MaxOutputTokens:          mot,
+		InputCostPerMillion:      old.InputCostPerMillion,
+		InputCacheCostPerMillion: old.InputCacheCostPerMillion,
+		OutputCostPerMillion:     old.OutputCostPerMillion,
 	}
 }
 
@@ -683,20 +685,23 @@ func (s *AgentServer) RegisterModel(key, provider, modelID, apiKey, baseURL stri
 	defer s.modelsMu.Unlock()
 	s.modelConfigs[key] = ModelConfig{
 		Provider: provider, ModelID: modelID, APIKey: apiKey, BaseURL: baseURL,
-		MaxOutputTokens:        pricing.MaxOutputTokens,
-		InputCostPerToken:      pricing.InputCostPerToken,
-		InputCacheCostPerToken: pricing.InputCacheCostPerToken,
-		OutputCostPerToken:     pricing.OutputCostPerToken,
+		MaxInputTokens:           pricing.MaxInputTokens,
+		MaxOutputTokens:          pricing.MaxOutputTokens,
+		InputCostPerMillion:      pricing.InputCostPerMillion,
+		InputCacheCostPerMillion: pricing.InputCacheCostPerMillion,
+		OutputCostPerMillion:     pricing.OutputCostPerMillion,
 	}
 }
 
 // ModelPricing carries the per-model capability/cost metadata (from the
-// settings models config) used for usage reporting.
+// settings models config) used for usage reporting. Costs are USD per 1M
+// tokens (matching OpenRouter/litellm convention).
 type ModelPricing struct {
-	MaxOutputTokens        int
-	InputCostPerToken      float64
-	InputCacheCostPerToken float64
-	OutputCostPerToken     float64
+	MaxInputTokens           int
+	MaxOutputTokens          int
+	InputCostPerMillion      float64
+	InputCacheCostPerMillion float64
+	OutputCostPerMillion     float64
 }
 
 // resolveModelConfig returns the provider and bare model ID for the current
@@ -2889,9 +2894,11 @@ func (s *AgentServer) usageCost(ss *agentSession, usage openagent.Usage) *openac
 		cached = usage.PromptTokens
 	}
 	uncached := usage.PromptTokens - cached
-	amount := float64(uncached)*mc.InputCostPerToken +
-		float64(cached)*mc.InputCacheCostPerToken +
-		float64(usage.CompletionTokens)*mc.OutputCostPerToken
+	// Costs are USD per 1M tokens; divide by 1e6 to get the per-token rate.
+	const perMillion = 1_000_000
+	amount := (float64(uncached)*mc.InputCostPerMillion +
+		float64(cached)*mc.InputCacheCostPerMillion +
+		float64(usage.CompletionTokens)*mc.OutputCostPerMillion) / perMillion
 	return &openacp.Cost{Amount: amount, Currency: "USD"}
 }
 

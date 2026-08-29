@@ -115,15 +115,16 @@ func buildModels(providers map[string]config.ProviderConfig) ([]openagent.Model,
 			}
 			models = append(models, m)
 			infos = append(infos, modelReg{
-				ID:                     mc.ID,
-				Provider:               pid,
-				Model:                  m,
-				APIKey:                 apiKey,
-				BaseURL:                p.BaseURL,
-				MaxOutputTokens:        mc.MaxOutputTokens,
-				InputCostPerToken:      mc.InputCostPerToken,
-				InputCacheCostPerToken: mc.InputCacheCostPerToken,
-				OutputCostPerToken:     mc.OutputCostPerToken,
+				ID:                       mc.ID,
+				Provider:                 pid,
+				Model:                    m,
+				APIKey:                   apiKey,
+				BaseURL:                  p.BaseURL,
+				MaxInputTokens:           mc.MaxInputTokens,
+				MaxOutputTokens:          mc.MaxOutputTokens,
+				InputCostPerMillion:      mc.InputCostPerMillion,
+				InputCacheCostPerMillion: mc.InputCacheCostPerMillion,
+				OutputCostPerMillion:     mc.OutputCostPerMillion,
 			})
 		}
 	}
@@ -131,15 +132,16 @@ func buildModels(providers map[string]config.ProviderConfig) ([]openagent.Model,
 }
 
 type modelReg struct {
-	ID                     string
-	Provider               string
-	Model                  openagent.Model
-	APIKey                 string
-	BaseURL                string
-	MaxOutputTokens        int
-	InputCostPerToken      float64
-	InputCacheCostPerToken float64
-	OutputCostPerToken     float64
+	ID                       string
+	Provider                 string
+	Model                    openagent.Model
+	APIKey                   string
+	BaseURL                  string
+	MaxInputTokens           int
+	MaxOutputTokens          int
+	InputCostPerMillion      float64
+	InputCacheCostPerMillion float64
+	OutputCostPerMillion     float64
 }
 
 // Key returns the registry key for this model: "<provider>/<id>" when a
@@ -711,7 +713,7 @@ func (sw *settingsWatcher) reconfigureModels(cfg config.Config) {
 	for _, mi := range newInfos {
 		newKeys[mi.Key()] = true
 		sw.srv.SetModel(mi.Provider, mi.ID, mi.APIKey, mi.BaseURL,
-			mi.MaxOutputTokens, 0)
+			mi.MaxInputTokens, mi.MaxOutputTokens)
 	}
 	// Remove models that are no longer in settings.
 	for _, key := range sw.srv.ModelIDs() {

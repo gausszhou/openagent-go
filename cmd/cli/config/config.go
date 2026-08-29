@@ -185,9 +185,9 @@ type ProviderConfig struct {
 //	  "id": "qwen-128k",
 //	  "max_input_tokens": 128000,
 //	  "max_output_tokens": 8192,
-//	  "input_cost_per_token": 0.000001,
-//	  "input_cache_cost_per_token": 0.0000001,
-//	  "output_cost_per_token": 0.000002
+//	  "input_cost_per_million": 1,
+//	  "input_cache_cost_per_million": 0.1,
+//	  "output_cost_per_million": 2
 //	}]
 //
 // max_input_tokens overrides the built-in vendor lookup — required for
@@ -199,9 +199,9 @@ type ModelConfig struct {
 	ID                     string  `json:"id"`
 	MaxInputTokens         int     `json:"max_input_tokens,omitempty"`
 	MaxOutputTokens        int     `json:"max_output_tokens,omitempty"`
-	InputCostPerToken      float64 `json:"input_cost_per_token,omitempty"`
-	InputCacheCostPerToken float64 `json:"input_cache_cost_per_token,omitempty"`
-	OutputCostPerToken     float64 `json:"output_cost_per_token,omitempty"`
+	InputCostPerMillion      float64 `json:"input_cost_per_million,omitempty"`
+	InputCacheCostPerMillion float64 `json:"input_cache_cost_per_million,omitempty"`
+	OutputCostPerMillion     float64 `json:"output_cost_per_million,omitempty"`
 }
 
 // UnmarshalJSON accepts both the legacy string form ("gpt-4o") and the

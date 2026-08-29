@@ -58,6 +58,88 @@ func New(apiKey, modelID, baseURL string) *Model {
 
 func (m *Model) WithContextWindow(tokens int) *Model { m.contextWindow = tokens; return m }
 func (m *Model) ContextWindow() int                  { return m.contextWindow }
+
+// ListModels queries the provider's /models endpoint for the list of
+// available models. Works against any OpenAI-compatible base URL (OpenAI,
+// OpenRouter, Together, Groq, Ollama, ...). The endpoint path is relative
+// to the Model's baseURL — the SDK issues GET <baseURL>/models.
+//
+// The standard OpenAI response carries only id/created/owned_by. Other
+// fields are resolved from the built-in lookup table. Providers that add
+// extension fields in the response override the table:
+//   - OpenRouter: context_length (= max input tokens),
+//     top_provider.max_completion_tokens, pricing.{prompt,completion}
+//     (strings, USD per 1M tokens — converted to per-token here).
+//
+// Returns models sorted by ID.
+func (m *Model) ListModels(ctx context.Context) ([]openagent.AvailableModel, error) {
+	page, err := m.client.Models.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	out := make([]openagent.AvailableModel, 0, len(page.Data))
+	for _, mo := range page.Data {
+		am := openagent.AvailableModel{
+			ID:             mo.ID,
+			OwnedBy:        mo.OwnedBy,
+			MaxInputTokens: utils.ModelContextWindow(mo.ID),
+		}
+		if raw := mo.RawJSON(); raw != "" {
+			applyExtensionFields(&am, raw)
+		}
+		out = append(out, am)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// applyExtensionFields fills AvailableModel fields from provider-specific
+// extensions in the raw /models JSON. Only non-zero response values
+// override the table-derived defaults.
+func applyExtensionFields(am *openagent.AvailableModel, rawJSON string) {
+	// OpenRouter shape: top-level context_length, top_provider.{...},
+	// pricing.{prompt,completion} as strings (USD per 1M tokens).
+	var probe struct {
+		ContextLength int `json:"context_length"`
+		TopProvider   struct {
+			MaxCompletionTokens int `json:"max_completion_tokens"`
+		} `json:"top_provider"`
+		Pricing struct {
+			Prompt     string `json:"prompt"`
+			Completion string `json:"completion"`
+		} `json:"pricing"`
+	}
+	if err := json.Unmarshal([]byte(rawJSON), &probe); err != nil {
+		return
+	}
+	if probe.ContextLength > 0 {
+		am.MaxInputTokens = probe.ContextLength
+	}
+	if probe.TopProvider.MaxCompletionTokens > 0 {
+		am.MaxOutputTokens = probe.TopProvider.MaxCompletionTokens
+	}
+	// OpenRouter prices are USD per 1M tokens — same unit as the fields.
+	if v := parsePerMillionPrice(probe.Pricing.Prompt); v > 0 {
+		am.InputCostPerMillion = v
+	}
+	if v := parsePerMillionPrice(probe.Pricing.Completion); v > 0 {
+		am.OutputCostPerMillion = v
+	}
+}
+
+// parsePerMillionPrice parses a price string expressed as USD per 1M tokens.
+// Returns 0 on parse failure or non-positive.
+func parsePerMillionPrice(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "0" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f <= 0 {
+		return 0
+	}
+	return f
+}
 // TokenizerModel returns a tiktoken-encodable canonical name for the
 // model, not the user-assigned model ID (which tiktoken cannot map).
 // o1/o3 reasoning models use the o200k encoding; everything else uses
@@ -84,6 +166,7 @@ func modelContextWindow(modelID string) int {
 
 // Ensure *Model implements the optional TokenizerModeler interface.
 var _ openagent.TokenizerModeler = (*Model)(nil)
+var _ openagent.ModelLister = (*Model)(nil)
 
 func (m *Model) ChatCompletion(ctx context.Context, req openagent.ChatCompletionRequest) (*openagent.ChatCompletionResponse, error) {
 	modelID := req.Model

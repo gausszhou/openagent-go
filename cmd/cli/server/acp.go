@@ -193,10 +193,11 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 	// Register model configs for runtime_set_model_config.
 	for _, mi := range modelInfos {
 		srv.RegisterModel(mi.Key(), mi.Provider, mi.ID, mi.APIKey, mi.BaseURL, acp.ModelPricing{
-			MaxOutputTokens:        mi.MaxOutputTokens,
-			InputCostPerToken:      mi.InputCostPerToken,
-			InputCacheCostPerToken: mi.InputCacheCostPerToken,
-			OutputCostPerToken:     mi.OutputCostPerToken,
+			MaxInputTokens:           mi.MaxInputTokens,
+			MaxOutputTokens:          mi.MaxOutputTokens,
+			InputCostPerMillion:      mi.InputCostPerMillion,
+			InputCacheCostPerMillion: mi.InputCacheCostPerMillion,
+			OutputCostPerMillion:     mi.OutputCostPerMillion,
 		})
 	}
 
