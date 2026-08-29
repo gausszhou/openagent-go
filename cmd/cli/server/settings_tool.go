@@ -45,6 +45,27 @@ func (t *settingsTool) Definition() openagent.FunctionDefinition {
 			"Actions: set <key> <value>, get <key>, list, append <key> <value> (to an array), delete <key>. " +
 			"Keys are dotted paths (telemetry.endpoint, provider.openai.apikey, mcp_servers.<name>.command, log.level). " +
 			"\n\n" +
+			"SCHEMA (the three hot-reloadable groups — map/object keys are NAMES, never array indices):\n" +
+			`{
+  "provider": {                        // OBJECT keyed by provider name, NOT an array
+    "openai": {
+      "api_key": "sk-...",
+      "base_url": "https://api.openai.com/v1",
+      "models": ["gpt-4o", {"id": "qwen-128k", "max_input_tokens": 128000, "max_output_tokens": 8192, "input_cost_per_million": 1, "input_cache_cost_per_million": 0.1, "output_cost_per_million": 2}]
+    }
+  },
+  "mcp_servers": {                     // OBJECT keyed by server name, NOT an array
+    "weather": {"command": "uvx", "args": ["mcp-server-weather"], "env": {"API_KEY": "..."}},
+    "remote1": {"url": "https://...", "type": "http"}
+  },
+  "log": {"file": "...", "level": "info", "max_size": 10, "max_backups": 5, "max_age": 30}
+}
+TYPE RULES (a type-mismatched write is REJECTED before save — the file stays untouched):
+- provider and mcp_servers MUST be objects keyed by name; an array ([{...}]) is rejected.
+- provider.<name>.models entries accept a plain string OR an object, never a bare number.
+- mcp_servers.<name>.type: only "stdio" (default/empty) | "http" | "sse"; anything else (e.g. "remote") falls back to stdio and fails.
+- log.level: only "trace" | "debug" | "info" | "warn" | "error".` +
+			"\n\n" +
 			"MECHANISM: writes are atomic (temp file + rename, never a half-written file) and validated against the Config schema before save — a type-mismatched value (e.g. log.level=123) is rejected, the file is not touched. A running server watches the file via fsnotify and hot-reloads within ~500ms. " +
 			fmt.Sprintf("FILE LOCATIONS: settings.json is at %s. %s", config.Path(), logLocationClause()) +
 			"HOT-RELOAD (no restart): telemetry.*, log.level, provider.* (models), mcp_servers.* — mcp_servers affects new/reloaded sessions; active sessions keep their connected tools. " +
