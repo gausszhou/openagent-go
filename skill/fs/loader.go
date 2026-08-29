@@ -16,7 +16,7 @@
 //
 // In addition to disk roots, a Loader may carry an embedded fs.FS (set via
 // WithEmbedFS) as the lowest-priority source. Embedded skills are bundled into
-// the binary at build time (-tags embed) so the agent ships with built-in
+// the binary unconditionally via //go:embed so the agent ships with built-in
 // skills without requiring on-disk files. Disk roots always override embedded
 // skills of the same name.
 package fs

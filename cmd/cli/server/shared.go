@@ -393,14 +393,14 @@ func resolveProfileFile(cwd, filename, defaultText string) string {
 // ── Optional capability builders ──
 
 // openSkillProvider creates a file-system skill provider spanning the skill
-// directories that exist plus the embedded built-in skills (when built with
-// -tags embed). Roots are passed to fs.New in override order (user-level first,
-// project-level last), so skills in a later root override same-name skills
-// from an earlier root:
+// directories that exist plus the embedded built-in skills (bundled via
+// //go:embed, no build tag required). Roots are passed to fs.New in override
+// order (user-level first, project-level last), so skills in a later root
+// override same-name skills from an earlier root:
 //
 //  1. ~/.agents/skills            (user-level)
 //  2. <workspace>/.agents/skills  (project-level, overrides user-level)
-//  3. embedded built-in skills    (lowest priority, -tags embed only)
+//  3. embedded built-in skills    (lowest priority, always present)
 //
 // Directories that do not exist are skipped. Returns nil only when there are
 // no disk roots AND no embedded skills.
