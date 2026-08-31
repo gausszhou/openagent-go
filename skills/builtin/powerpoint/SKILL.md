@@ -95,6 +95,16 @@ export default async function build(pptx, ctx) {
 - Use editable text wherever practical; use images for photos, screenshots, logos, or complex visual backgrounds.
 - Add speaker notes when useful; `pptx_read` can surface them later.
 
+## Information Sources
+
+The tools available for retrieving external information are:
+
+- `websearch` — search-engine queries (returns titles, URLs, and snippets).
+- `webfetch` — fetch a known URL and extract its main text content.
+- `browser_navigate` / `browser_screenshot` / `browser_evaluate` / `browser_click`, and the `browser_use_*` family — for pages that require JavaScript rendering or interaction to surface their content.
+
+A deck's factual content (statistics, citations, quotes, dates, entity names, recent events) comes from outside the model. The model can only reproduce what was in its training data, which has a cutoff and is unreliable for precise figures, proper citations, or anything time-sensitive. `websearch` and `webfetch`/`browser_*` are how that external content reaches the model; without them, any specific fact in the script is a guess. Source URLs collected during research can be cited on slides or in notes.
+
 ## PptxGenJS Reference
 
 Use this reference when writing the JavaScript build script for the `pptx_write` tool.
