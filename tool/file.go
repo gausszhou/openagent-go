@@ -239,10 +239,35 @@ func (t *WriteFile) Execute(ctx context.Context, args json.RawMessage) *openagen
 	if info != nil {
 		size = info.Size()
 	}
+	// Report two facts the model can act on: how many lines the written
+	// content occupies, and whether it ends in a newline. The trailing-
+	// newline flag matters for append: a chunk without a trailing "\n"
+	// will merge its last line with the next chunk's first line.
+	trailingNL := strings.HasSuffix(params.Content, "\n")
 	if params.Append {
-		return &openagent.ToolResult{Content: fmt.Sprintf("Appended %d bytes to %s (file now %d bytes)", wroteBytes, params.Path, size)}
+		wroteLines := lineCount(params.Content)
+		var totalLines int
+		if b, readErr := os.ReadFile(abs); readErr == nil {
+			totalLines = lineCount(string(b))
+		}
+		return &openagent.ToolResult{Content: fmt.Sprintf("Appended %d bytes (%d lines, trailing newline: %v) to %s (file now %d bytes, %d lines)", wroteBytes, wroteLines, trailingNL, params.Path, size, totalLines)}
 	}
-	return &openagent.ToolResult{Content: fmt.Sprintf("Wrote %s (%d bytes)", params.Path, size)}
+	wroteLines := lineCount(params.Content)
+	return &openagent.ToolResult{Content: fmt.Sprintf("Wrote %s (%d bytes, %d lines, trailing newline: %v)", params.Path, size, wroteLines, trailingNL)}
+}
+
+// lineCount reports the number of lines in s, counting a final line that
+// has no trailing newline (so "a\nb" and "a\nb\n" both report 2). Returns
+// 0 for the empty string.
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
 }
 
 // ── ListDir ──
