@@ -6,7 +6,7 @@
 // Usage:
 //
 //	tp, err := otel.SetupTracer(ctx, otel.Config{
-//	    Endpoint:   "http://localhost:4318",
+//	    Endpoint:   "localhost:4318",        // bare host:port (recommended)
 //	    ServiceName: "openagent",
 //	})
 //	if err != nil { ... }
@@ -37,7 +37,12 @@ import (
 // config.TelemetryConfig but lives in the otel package so callers outside
 // cmd/cli/config can use it without a circular import.
 type Config struct {
-	Endpoint    string // OTLP endpoint URL; empty = no-op provider
+	// Endpoint is the OTLP collector target. Accepts either a bare
+	// "host:port" (e.g. "localhost:4318" — recommended; the SDK prepends
+	// the scheme from Insecure + Protocol) or a full URL with scheme
+	// (e.g. "http://localhost:4318" or "https://collector:4318/otlp" —
+	// the SDK parses host/path/TLS out of it). Empty = no-op provider.
+	Endpoint    string
 	Protocol    string // "http" (default) or "grpc"
 	ServiceName string // OTel resource service.name; default "openagent"
 	Insecure    bool   // disable TLS (default true for local collectors)
@@ -80,17 +85,45 @@ func SetupTracer(ctx context.Context, cfg Config) (*SetupResult, error) {
 
 	// Build the OTLP trace exporter. A creation failure or unsupported
 	// protocol degrades to no-op rather than blocking startup.
+	//
+	// The OTel SDK has two endpoint options, and Endpoint may be written
+	// either way (users and the settings tool supply both):
+	//   - a bare "host:port" (e.g. "localhost:4318") → WithEndpoint, which
+	//     stores the string verbatim and lets the SDK prepend the scheme
+	//     derived from Insecure + Protocol;
+	//   - a full URL with scheme (e.g. "http://localhost:4318" or
+	//     "https://collector.example:4318/otlp") → WithEndpointURL, which
+	//     parses host/path/TLS out of the URL.
+	// Routing matters: WithEndpoint stores the value as the URL Host
+	// verbatim, and the HTTP exporter then does
+	//   url.URL{Scheme: <insecure?http:https>, Host: cfg.Endpoint, Path: ...}
+	// so passing a full URL to WithEndpoint yields a double scheme
+	// ("http://http://localhost:4318/v1/traces"). detectEndpointURL picks
+	// the right option so neither shape breaks.
+	endpoint, isURL := detectEndpointURL(cfg.Endpoint)
 	var exporter sdktrace.SpanExporter
 	var err error
 	switch protocol {
 	case "grpc":
-		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.Endpoint)}
+		var opt otlptracegrpc.Option
+		if isURL {
+			opt = otlptracegrpc.WithEndpointURL(endpoint)
+		} else {
+			opt = otlptracegrpc.WithEndpoint(endpoint)
+		}
+		opts := []otlptracegrpc.Option{opt}
 		if cfg.Insecure {
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
 		exporter, err = otlptracegrpc.New(ctx, opts...)
 	case "http":
-		opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(cfg.Endpoint)}
+		var opt otlptracehttp.Option
+		if isURL {
+			opt = otlptracehttp.WithEndpointURL(endpoint)
+		} else {
+			opt = otlptracehttp.WithEndpoint(endpoint)
+		}
+		opts := []otlptracehttp.Option{opt}
 		if cfg.Insecure {
 			opts = append(opts, otlptracehttp.WithInsecure())
 		}
@@ -125,6 +158,34 @@ func SetupTracer(ctx context.Context, cfg Config) (*SetupResult, error) {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	return &SetupResult{Provider: tp, Tracer: tp.Tracer(version.Name)}, nil
+}
+
+// detectEndpointURL reports whether endpoint is a full URL (has an
+// http/https scheme) and returns the value to hand to the OTel SDK.
+//
+// The SDK splits endpoint handling across two options: WithEndpoint takes a
+// bare "host:port" (stored verbatim as the URL Host, scheme prepended by the
+// SDK from Insecure/Protocol), and WithEndpointURL takes a full URL (parsed
+// into host/path/TLS by the SDK). A scheme-bearing input must go to
+// WithEndpointURL — routing it through WithEndpoint makes the SDK prepend its
+// own scheme, producing "http://http://localhost:4318/v1/traces".
+//
+// "localhost:4318" → ("localhost:4318", false) → WithEndpoint.
+// "http://localhost:4318" → ("http://localhost:4318", true) → WithEndpointURL.
+// "https://collector:4318/otlp" → (same, true) → WithEndpointURL (path+TLS
+// honored by the SDK; the Insecure flag then has no effect, which is correct —
+// an explicit https:// URL opts into TLS regardless of the Insecure setting).
+//
+// Anything else (bare host, host:port, empty) returns (endpoint, false): the
+// bare-host and host:port forms are what WithEndpoint is designed for, and the
+// Insecure/Protocol fields govern scheme and transport.
+func detectEndpointURL(endpoint string) (string, bool) {
+	e := strings.TrimSpace(endpoint)
+	lower := strings.ToLower(e)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return e, true
+	}
+	return e, false
 }
 
 // loggingExporter wraps a SpanExporter and logs the first export failure

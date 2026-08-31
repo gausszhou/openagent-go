@@ -87,18 +87,30 @@ type TUIColors struct {
 
 // TelemetryConfig configures OpenTelemetry trace export.
 type TelemetryConfig struct {
-	// Endpoint is the OTLP trace endpoint URL. When empty, telemetry is
-	// disabled. Example: "http://localhost:4318" (HTTP) or
-	// "localhost:4317" (gRPC).
+	// Endpoint is the OTLP collector target. Accepts either a bare
+	// "host:port" (recommended, e.g. "localhost:4318" for HTTP,
+	// "localhost:4317" for gRPC — the scheme is derived from Protocol +
+	// Insecure) or a full URL with scheme (e.g.
+	// "http://localhost:4318" or "https://collector.example:4318/otlp").
+	// When empty, telemetry is disabled.
+	//
+	// Do NOT pass a full URL when also setting Protocol/Insecure for a
+	// bare endpoint — pick one form. The two are mutually exclusive in
+	// intent: a bare host:port pairs with Protocol/Insecure; a full URL
+	// carries its own scheme/path/TLS.
 	Endpoint string `json:"endpoint,omitempty"`
 	// Protocol selects the OTLP transport: "http" (default) or "grpc".
+	// Ignored when Endpoint is a full URL whose scheme implies the
+	// transport (http:// → HTTP, the gRPC exporter still uses host:port
+	// form in practice — prefer bare host:port for gRPC).
 	Protocol string `json:"protocol,omitempty"`
 	// ServiceName is the OTel resource service.name attribute.
 	// Default: "openagent".
 	ServiceName string `json:"service_name,omitempty"`
 	// Insecure disables TLS when the endpoint is plain HTTP. Default:
 	// true (most local collectors use plain HTTP). Set false for a
-	// TLS-secured collector.
+	// TLS-secured collector. Has no effect when Endpoint is a full URL
+	// — the URL's own scheme (http:// vs https://) governs TLS.
 	Insecure *bool `json:"insecure,omitempty"`
 }
 

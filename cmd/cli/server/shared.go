@@ -703,23 +703,28 @@ func (sw *settingsWatcher) reconfigureTelemetry(ctx context.Context, cfg config.
 	slog.Info("settings reloaded: telemetry", "endpoint", cfg.Telemetry.Endpoint, "protocol", cfg.Telemetry.Protocol)
 }
 
-// reconfigureModels diffs old/new providers and updates the ACP model
-// registry. New providers/models are added; removed ones are logged but
-// not deleted (existing sessions may still reference them).
+// reconfigureModels applies provider/model additions and updates to the ACP
+// model registry. New providers/models are inserted via SetModel; changed
+// providers (edited API key/baseURL/context window) are replaced in place.
+//
+// Providers no longer in settings are NOT removed. Two reasons:
+//  1. Plugin-injected providers (from cli:settings plugins) are absent from
+//     the file-only config that reload parses, so a delete-on-missing loop
+//     would scrub them on every reload. SetModel is replace-or-insert, so
+//     add/update still works; the missing-from-file case is simply left
+//     untouched.
+//  2. Existing sessions may still reference a model the user just removed
+//     from settings.json; deletion would break them. Removal happens on
+//     restart.
+//
+// This matches the original design intent this function's comment stated
+// ("removed ones are logged but not deleted") before the delete loop was
+// added in contradiction to it.
 func (sw *settingsWatcher) reconfigureModels(cfg config.Config) {
 	_, newInfos := buildModels(cfg.Provider)
-	// Build the set of new model keys.
-	newKeys := make(map[string]bool, len(newInfos))
 	for _, mi := range newInfos {
-		newKeys[mi.Key()] = true
 		sw.srv.SetModel(mi.Provider, mi.ID, mi.APIKey, mi.BaseURL,
 			mi.MaxInputTokens, mi.MaxOutputTokens)
-	}
-	// Remove models that are no longer in settings.
-	for _, key := range sw.srv.ModelIDs() {
-		if !newKeys[key] {
-			sw.srv.RemoveModel(key)
-		}
 	}
 	// The extractor uses a dynamic model lookup (SetModelFn at startup),
 	// so it automatically picks up the new model instances — no manual

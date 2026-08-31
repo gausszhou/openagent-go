@@ -58,13 +58,23 @@ func (t *settingsTool) Definition() openagent.FunctionDefinition {
     "weather": {"command": "uvx", "args": ["mcp-server-weather"], "env": {"API_KEY": "..."}},
     "remote1": {"url": "https://...", "type": "http"}
   },
+  "telemetry": {                       // OTel trace export; empty endpoint = disabled
+    "endpoint": "localhost:4318",      // bare host:port (RECOMMENDED). Also accepts a full URL
+                                       //   "http://localhost:4318" or "https://collector:4318/otlp"
+                                       //   — but NEVER pass a bare URL scheme to protocol; pick ONE form.
+    "protocol": "http",                // "http" (default) | "grpc" — pairs with a bare host:port endpoint
+    "service_name": "openagent",
+    "insecure": true                   // bool; true for plain HTTP collectors (default). Ignored when
+                                       //   endpoint is a full URL — the URL scheme governs TLS then.
+  },
   "log": {"file": "...", "level": "info", "max_size": 10, "max_backups": 5, "max_age": 30}
 }
 TYPE RULES (a type-mismatched write is REJECTED before save — the file stays untouched):
 - provider and mcp_servers MUST be objects keyed by name; an array ([{...}]) is rejected.
 - provider.<name>.models entries accept a plain string OR an object, never a bare number.
 - mcp_servers.<name>.type: only "stdio" (default/empty) | "http" | "sse"; anything else (e.g. "remote") falls back to stdio and fails.
-- log.level: only "trace" | "debug" | "info" | "warn" | "error".` +
+- log.level: only "trace" | "debug" | "info" | "warn" | "error".
+- telemetry.endpoint: bare "host:port" (e.g. "localhost:4318", pairs with protocol+insecure) OR a full URL "http(s)://host[:port][/path]". Do NOT combine a full-URL endpoint with protocol/insecure — the URL's scheme already carries both.` +
 			"\n\n" +
 			"MECHANISM: writes are atomic (temp file + rename, never a half-written file) and validated against the Config schema before save — a type-mismatched value (e.g. log.level=123) is rejected, the file is not touched. A running server watches the file via fsnotify and hot-reloads within ~500ms. " +
 			fmt.Sprintf("FILE LOCATIONS: settings.json is at %s. %s", config.Path(), logLocationClause()) +
