@@ -5,14 +5,14 @@ description: Create designed, editable PowerPoint .pptx presentations with PptxG
 
 # PowerPoint
 
-Use this skill whenever a PowerPoint deck is involved. For new decks, pass a trusted PptxGenJS build script directly to the `pptx_write` tool. For filling or editing an existing template, call `pptx_template_analyze` first and then `pptx_template_fill` with the exact IDs returned by analysis.
+Use this skill whenever a PowerPoint deck is involved. For new decks, pass a PptxGenJS build script to the `pptx_write` tool — inline via `script` (preferred, for small decks) or via `script_path` for large decks whose script is written to a `.mjs` file. For filling or editing an existing template, call `pptx_template_analyze` first and then `pptx_template_fill` with the exact IDs returned by analysis.
 
 ## Workflow
 
 1. Decide the deck outline and choose a visual system: palette, typography, repeated motif, and slide rhythm.
 2. Write JavaScript module content that exports `default async function build(pptx, ctx)` or named `build(pptx, ctx)`.
 3. In the script, add slides directly with PptxGenJS. Do not generate HTML for this workflow.
-4. Call `pptx_write` with `path`, `script`, optional `assets_dir`, and optional `data`.
+4. Pass the script to `pptx_write`. **Prefer inline** (`script`) for small decks — pass `path`, `script`, optional `assets_dir`, and optional `data`. For large decks (many slides), writing the whole script inline bloats the tool call; instead write it to a `.mjs` file with the write tool (first call creates it, subsequent calls use `append=true` to add chunks), then pass `path` + `script_path`.
 5. Verify the result with `pptx_read`; for visual QA, convert the PPTX to images if the environment has LibreOffice and Poppler.
 
 ## Template Workflow
@@ -23,11 +23,13 @@ Use this skill whenever a PowerPoint deck is involved. For new decks, pass a tru
 
 ## Script Creation
 
-- Put the complete JavaScript module in the `script` argument.
-- Do not use `local_file_write` or shell commands to create a temporary `.mjs` file for this workflow.
-- If revising a deck, update the `script` content and call `pptx_write` again.
+- **Inline (preferred)**: put the complete JavaScript module in the `script` argument. Best for small decks where the script is short.
+- **File path (large decks)**: when the script is large, writing it inline bloats the tool call and the model's thinking with script source. Instead use the write tool to create a `.mjs` file — first call writes it, subsequent calls pass `append=true` to append chunks — then pass its path as `script_path`. Either way the build function signature is the same: `default async function build(pptx, ctx)`.
+- If revising a deck, update the script (inline `script` or the `.mjs` file) and call `pptx_write` again.
 
 ## Tool Contract
+
+Inline (small deck):
 
 ```json
 {
@@ -41,7 +43,20 @@ Use this skill whenever a PowerPoint deck is involved. For new decks, pass a tru
 }
 ```
 
-The worker creates the PptxGenJS instance and writes the output file. The script only adds slides and content.
+File path (large deck — script written to a `.mjs` file via the write tool):
+
+```json
+{
+  "tool": "pptx_write",
+  "arguments": {
+    "path": "deck.pptx",
+    "script_path": "/tmp/deck.mjs",
+    "data": {"title": "Quarterly Review"}
+  }
+}
+```
+
+Pass exactly one of `script` or `script_path`. The worker creates the PptxGenJS instance and writes the output file. The script only adds slides and content.
 
 ```javascript
 export default async function build(pptx, ctx) {
