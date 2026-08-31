@@ -26,13 +26,15 @@ import (
 )
 
 // errNoModel is returned when neither the config nor the session provides
-// a model.
+// a model. The message stays free of Go-API symbols so it reads cleanly to
+// end users (CLI/TUI) and embedding developers alike — the caller layer
+// knows how models are configured for its surface and can wrap if needed.
 var errNoModel = &noModelError{}
 
 type noModelError struct{}
 
 func (*noModelError) Error() string {
-	return "no model configured (set agent.WithModel or session.Model)"
+	return "no model configured (configure a model on the agent or session)"
 }
 
 // Deps are the runtime dependencies injected at construction — everything
