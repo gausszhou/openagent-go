@@ -35,7 +35,7 @@ IMPORTANT: The context below is generated fresh for this turn. If it conflicts w
 
 OS: %s
 Arch: %s
-Date: %s
+Date today: %s
 `, runtime.GOOS, runtime.GOARCH, time.Now().Format("2006-01-02")))
 
 	// Skills catalog (full, from the AgentContext — the context layer owns

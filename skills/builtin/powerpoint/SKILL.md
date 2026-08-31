@@ -23,6 +23,7 @@ Use this skill whenever a PowerPoint deck is involved. For new decks, pass a Ppt
 
 ## Script Creation
 
+- **Build environment.** The script runs in a Node.js worker spawned from a temp directory that has no `node_modules`. PptxGenJS-Plus, JSZip, and pako are already bundled into the worker, so they reach the script only as the `pptx` instance and the `ctx` argument of `build(pptx, ctx)` — not as importable modules. Node built-ins (`node:fs`, `node:path`, …) resolve from the temp file; npm packages do not, since there is no `node_modules` to resolve against.
 - **Inline (preferred)**: put the complete JavaScript module in the `script` argument. Best for small decks where the script is short.
 - **File path (large decks)**: when the script is large, writing it inline bloats the tool call and the model's thinking with script source. Instead use the write tool to create a `.mjs` file — first call writes it, subsequent calls pass `append=true` to append chunks — then pass its path as `script_path`. Either way the build function signature is the same: `default async function build(pptx, ctx)`.
 - If revising a deck, update the script (inline `script` or the `.mjs` file) and call `pptx_write` again.
