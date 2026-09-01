@@ -25,6 +25,9 @@ const DagVersion = 1
 // CostVersion is the current cost.json schema version.
 const CostVersion = 1
 
+// DriftVersion is the current drift.json schema version.
+const DriftVersion = 1
+
 // DagStatus tracks how far a deployment has progressed. Steps enforce a
 // minimum status (e.g. generate requires "specified") by checking the DAG
 // they load.
@@ -301,4 +304,76 @@ func invalidateCost(dir string) error {
 		return fmt.Errorf("invalidate cost.json: %w", err)
 	}
 	return nil
+}
+
+// ── Drift detection (check_drift) ──
+
+// DriftStatus is the outcome of a drift check.
+type DriftStatus string
+
+const (
+	DriftClean       DriftStatus = "clean"        // no drift — cloud matches desired state
+	DriftDetected    DriftStatus = "drifted"      // cloud differs from desired state
+	DriftCheckFailed DriftStatus = "check_failed" // terraform plan failed during refresh
+)
+
+// DriftChange describes a single resource diff found by check_drift.
+// Fields mirror iac.ResourceChange but are self-contained so dag.go stays
+// free of iac-package dependencies (same pattern as CostEstimate using []any).
+type DriftChange struct {
+	Address string          `json:"address"`
+	Type    string          `json:"type"`
+	Action  string          `json:"action"` // "create" | "update" | "delete"
+	Before  json.RawMessage `json:"before,omitempty"`
+	After   json.RawMessage `json:"after,omitempty"`
+}
+
+// DriftSummary counts drifted resources by action.
+type DriftSummary struct {
+	Create int `json:"create"`
+	Update int `json:"update"`
+	Delete int `json:"delete"`
+	Noop   int `json:"noop"`
+}
+
+// DriftResult is the persisted check_drift result, analogous to CostEstimate.
+// check_drift writes this to drift.json in the deployment directory; it does
+// NOT modify dag.json or cost.json — drift is a read-only side observation.
+type DriftResult struct {
+	Version      int           `json:"version"`
+	DeploymentID string        `json:"deployment_id"`
+	CheckedAt    string        `json:"checked_at"`
+	Status       DriftStatus   `json:"status"`
+	Summary      DriftSummary  `json:"summary"` // always emitted (omitempty has no effect on structs)
+	Changes      []DriftChange `json:"changes,omitempty"`
+	Error        string        `json:"error,omitempty"` // populated when status=check_failed
+}
+
+// driftPath returns the drift.json path inside a deployment directory.
+func driftPath(dir string) string {
+	return filepath.Join(dir, "drift.json")
+}
+
+// SaveDrift persists a drift check result atomically (tmp + rename).
+func SaveDrift(dir string, r *DriftResult) error {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal drift.json: %w", err)
+	}
+	return atomicWrite(driftPath(dir), data)
+}
+
+// DriftStatusOf returns the persisted drift status, or "" if no drift
+// check has been run (drift.json missing or unreadable). list_deployments
+// uses this to report drift_status per deployment.
+func DriftStatusOf(dir string) DriftStatus {
+	data, err := os.ReadFile(driftPath(dir))
+	if err != nil {
+		return ""
+	}
+	var r DriftResult
+	if err := json.Unmarshal(data, &r); err != nil {
+		return ""
+	}
+	return r.Status
 }

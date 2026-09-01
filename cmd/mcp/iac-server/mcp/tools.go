@@ -37,7 +37,7 @@ type Config struct {
 	ProviderMirrors []string // provider download mirrors (URLs or local paths)
 }
 
-// NewTools builds the 12 tools exposed by iac-server.
+// NewTools builds the 13 tools exposed by iac-server.
 func NewTools(cfg Config) []openagent.Tool {
 	return []openagent.Tool{
 		&proposeArchitectureTool{cfg: cfg},
@@ -47,6 +47,7 @@ func NewTools(cfg Config) []openagent.Tool {
 		&troubleshootDeploymentTool{cfg: cfg},
 		&applyDeploymentTool{cfg: cfg},
 		&destroyDeploymentTool{cfg: cfg},
+		&checkDriftTool{cfg: cfg},
 		&getDeploymentStatusTool{cfg: cfg},
 		&listDeploymentsTool{cfg: cfg},
 		&queryCloudTool{cfg: cfg},
@@ -273,7 +274,7 @@ type applyDeploymentTool struct{ cfg Config }
 func (t *applyDeploymentTool) Definition() openagent.FunctionDefinition {
 	return openagent.FunctionDefinition{
 		Name:        "apply_deployment",
-		Description: "Step 5 of deployment: Apply a saved terraform plan. This creates/modifies real cloud resources. The deployment must have been planned (generate_terraform_plan succeeded) AND cost-estimated (estimate_cost succeeded) first — apply is rejected with an error if the deployment has no current cost estimate." + " ASYNC: returns immediately with a job_id — call get_job_result(job_id, wait_seconds=25) to poll for the result.",
+		Description: "Step 5 of deployment: Apply a saved terraform plan. This creates/modifies real cloud resources. The deployment must have been planned (generate_terraform_plan succeeded) AND cost-estimated (estimate_cost succeeded) first — apply is rejected with an error if the deployment has no current cost estimate. After apply succeeds, use check_drift to verify the cloud resources actually match the desired state." + " ASYNC: returns immediately with a job_id — call get_job_result(job_id, wait_seconds=25) to poll for the result.",
 		Parameters:  openagent.SchemaOf[ApplyDeploymentParams](),
 	}
 }
@@ -435,6 +436,153 @@ func (t *destroyDeploymentTool) Execute(ctx context.Context, args json.RawMessag
 	return jobStarted(jobID, "destroy_deployment")
 }
 
+// ── check_drift ──
+
+// planFunc is the signature of iac.Client.Plan, extracted so tests can
+// inject a stub and exercise the non-dry-run drifted/check_failed branches
+// without a real terraform binary.
+type planFunc func(ctx context.Context) (*iac.Plan, error)
+
+type checkDriftTool struct {
+	cfg    Config
+	planFn planFunc // nil → use real iac.Client.Plan (production)
+}
+
+func (t *checkDriftTool) Definition() openagent.FunctionDefinition {
+	return openagent.FunctionDefinition{
+		Name: "check_drift",
+		Description: "Detect drift between terraform desired state and real cloud resources by running terraform plan (refresh + diff). " +
+			"Use this when the user asks whether a deployment is healthy, whether resources were changed manually outside terraform, " +
+			"whether the cloud still matches the plan, or to verify convergence after apply_deployment. " +
+			"Requires apply_deployment to have succeeded. Read-only — does not modify cloud resources. " +
+			"Returns {status: \"clean\" | \"drifted\" | \"check_failed\", summary, changes, error}. " +
+			"If drift is detected, the saved tfplan is updated to the remediation plan — " +
+			"call apply_deployment directly to converge cloud state back to desired (cost estimate stays valid, no re-estimate needed)." +
+			" ASYNC: returns immediately with a job_id — call get_job_result(job_id, wait_seconds=25) to poll for the result.",
+		Parameters: openagent.SchemaOf[CheckDriftParams](),
+	}
+}
+
+func (t *checkDriftTool) Execute(ctx context.Context, args json.RawMessage) *openagent.ToolResult {
+	params, err := openagent.ParseArgs[CheckDriftParams](args)
+	if err != nil {
+		return openagent.ErrorResult(fmt.Errorf("check_drift: %w", err), false, "")
+	}
+	if !validDeploymentID(params.DeploymentID) {
+		return openagent.ErrorResult(fmt.Errorf("check_drift: invalid deployment_id %q", params.DeploymentID), false, "")
+	}
+
+	jobID, err := t.cfg.Planner.SubmitJob(ctx, params.DeploymentID, "check_drift", func(ctx context.Context) (string, error) {
+		dir := workDir(t.cfg.DeploymentsDir, params.DeploymentID)
+
+		// State gate: drift only makes sense after apply — before apply,
+		// plan is all-create with no real cloud resources to drift from.
+		status := agent.DagStatusOf(dir)
+		if status != agent.DagApplied {
+			return "", fmt.Errorf("check_drift: deployment %s has not been applied (dag.Status=%q) — call apply_deployment first", params.DeploymentID, status)
+		}
+
+		// Dry-run: no real cloud state to compare against — simulated plan
+		// is all-create with no drift semantics. Still persist drift.json so
+		// list_deployments can report drift_status.
+		if t.cfg.DryRun {
+			result := agent.DriftResult{
+				Version:      agent.DriftVersion,
+				DeploymentID: params.DeploymentID,
+				CheckedAt:    time.Now().UTC().Format(time.RFC3339),
+				Status:       agent.DriftClean,
+			}
+			if err := agent.SaveDrift(dir, &result); err != nil {
+				return "", fmt.Errorf("check_drift: save drift.json: %w", err)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				return "", fmt.Errorf("check_drift: marshal: %w", err)
+			}
+			return string(data), nil
+		}
+
+		// Run plan (refresh + diff). This overwrites tfplan — if drift is
+		// detected, tfplan becomes the remediation plan that apply_deployment
+		// can consume directly to fix the drift. planFn is injected by tests;
+		// in production it is nil and we use the real iac.Client.
+		var plan *iac.Plan
+		if t.planFn != nil {
+			plan, err = t.planFn(ctx)
+		} else {
+			client, clientErr := iac.NewClient(ctx, dir, iacConfig(t.cfg.Cloud, t.cfg.DryRun, t.cfg.BinaryMirrors, t.cfg.ProviderMirrors))
+			if clientErr != nil {
+				return "", fmt.Errorf("check_drift: %w", clientErr)
+			}
+			plan, err = client.Plan(ctx)
+		}
+		if err != nil {
+			// Refresh failed (deleted resources, perms, provider bugs, network).
+			// Persist check_failed so list_deployments surfaces it. A write
+			// failure here does not change the primary error (plan failed),
+			// but we surface it as context so the caller knows drift.json
+			// may not reflect the failure.
+			failResult := agent.DriftResult{
+				Version:      agent.DriftVersion,
+				DeploymentID: params.DeploymentID,
+				CheckedAt:    time.Now().UTC().Format(time.RFC3339),
+				Status:       agent.DriftCheckFailed,
+				Error:        err.Error(),
+			}
+			if saveErr := agent.SaveDrift(dir, &failResult); saveErr != nil {
+				err = fmt.Errorf("%w (also failed to persist drift.json: %v)", err, saveErr)
+			}
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("check_drift: interrupted (ctx cancelled: %v) — terraform may have left a state lock; run troubleshoot_deployment before retrying: %w", ctx.Err(), err)
+			}
+			return "", fmt.Errorf("check_drift: terraform plan (refresh) failed: %w", err)
+		}
+
+		// planFromJSON skips NoOp changes, so non-empty Changes means drift.
+		driftStatus := agent.DriftClean
+		if len(plan.Changes) > 0 {
+			driftStatus = agent.DriftDetected
+		}
+
+		// Map iac.Plan fields to self-contained DriftResult types.
+		result := agent.DriftResult{
+			Version:      agent.DriftVersion,
+			DeploymentID: params.DeploymentID,
+			CheckedAt:    time.Now().UTC().Format(time.RFC3339),
+			Status:       driftStatus,
+			Summary: agent.DriftSummary{
+				Create: plan.Summary.Create,
+				Update: plan.Summary.Update,
+				Delete: plan.Summary.Delete,
+				Noop:   plan.Summary.Noop,
+			},
+		}
+		for _, c := range plan.Changes {
+			result.Changes = append(result.Changes, agent.DriftChange{
+				Address: c.Address,
+				Type:    c.Type,
+				Action:  string(c.Action),
+				Before:  c.Before,
+				After:   c.After,
+			})
+		}
+
+		if err := agent.SaveDrift(dir, &result); err != nil {
+			return "", fmt.Errorf("check_drift: save drift.json: %w", err)
+		}
+
+		data, err := json.Marshal(result)
+		if err != nil {
+			return "", fmt.Errorf("check_drift: marshal: %w", err)
+		}
+		return string(data), nil
+	})
+	if err != nil {
+		return openagent.ErrorResult(err, false, "")
+	}
+	return jobStarted(jobID, "check_drift")
+}
+
 // ── get_deployment_status ──
 
 type getDeploymentStatusTool struct{ cfg Config }
@@ -442,7 +590,7 @@ type getDeploymentStatusTool struct{ cfg Config }
 func (t *getDeploymentStatusTool) Definition() openagent.FunctionDefinition {
 	return openagent.FunctionDefinition{
 		Name:        "get_deployment_status",
-		Description: "Read the terraform state for a deployment and return a status summary. Does not call terraform binary — reads the state file directly.",
+		Description: "Read the LOCAL terraform state for a deployment and return a status summary. Does not call terraform binary — reads the state file directly, so the result may be stale if someone changed cloud resources manually. To verify the real cloud state matches the desired state, use check_drift instead.",
 		Parameters:  openagent.SchemaOf[GetDeploymentStatusParams](),
 	}
 }
@@ -548,7 +696,7 @@ func (t *getJobResultTool) Definition() openagent.FunctionDefinition {
 	return openagent.FunctionDefinition{
 		Name: "get_job_result",
 		Description: "Poll the result of an async job started by propose_architecture, specify_resources, generate_terraform_plan, " +
-			"update_deployment, estimate_cost, troubleshoot_deployment, or query_cloud. " +
+			"update_deployment, estimate_cost, troubleshoot_deployment, query_cloud, or check_drift. " +
 			"Those tools return immediately with a job_id; call this with that job_id to retrieve the outcome. " +
 			"Returns {status: \"running\"|\"done\"|\"failed\", progress_msg, progress_cur, progress_tot, outputs, result, error}. " +
 			"wait_seconds (0-120) blocks up to that long and returns as soon as the job finishes — " +
@@ -596,7 +744,7 @@ type listDeploymentsTool struct{ cfg Config }
 func (t *listDeploymentsTool) Definition() openagent.FunctionDefinition {
 	return openagent.FunctionDefinition{
 		Name:        "list_deployments",
-		Description: "List all deployments by scanning the deployments directory. Returns deployment IDs and whether each has a state file.",
+		Description: "List all deployments by scanning the deployments directory. Returns each deployment's ID, whether it has a state file, and its drift_status (\"clean\"/\"drifted\"/\"check_failed\"/\"\"=never checked). For any applied deployment whose drift_status is empty or stale, call check_drift to verify the real cloud state.",
 		Parameters:  openagent.SchemaOf[struct{}](),
 	}
 }
@@ -611,9 +759,10 @@ func (t *listDeploymentsTool) Execute(ctx context.Context, _ json.RawMessage) *o
 	}
 
 	type deployment struct {
-		ID       string `json:"id"`
-		HasState bool   `json:"has_state"`
-		HasPlan  bool   `json:"has_plan"`
+		ID          string            `json:"id"`
+		HasState    bool              `json:"has_state"`
+		HasPlan     bool              `json:"has_plan"`
+		DriftStatus agent.DriftStatus `json:"drift_status"` // "" = never checked
 	}
 
 	// Start as a non-nil slice so an empty deployments dir marshals to []
@@ -627,9 +776,10 @@ func (t *listDeploymentsTool) Execute(ctx context.Context, _ json.RawMessage) *o
 		_, stateErr := os.Stat(filepath.Join(dir, "terraform.tfstate"))
 		_, planErr := os.Stat(filepath.Join(dir, "tfplan"))
 		deployments = append(deployments, deployment{
-			ID:       entry.Name(),
-			HasState: stateErr == nil,
-			HasPlan:  planErr == nil,
+			ID:          entry.Name(),
+			HasState:    stateErr == nil,
+			HasPlan:     planErr == nil,
+			DriftStatus: agent.DriftStatusOf(dir),
 		})
 	}
 
@@ -695,6 +845,11 @@ type ApplyDeploymentParams struct {
 // DestroyDeploymentParams are the arguments to destroy_deployment.
 type DestroyDeploymentParams struct {
 	DeploymentID string `json:"deployment_id" jsonschema:"description=Deployment ID to destroy"`
+}
+
+// CheckDriftParams are the arguments to check_drift.
+type CheckDriftParams struct {
+	DeploymentID string `json:"deployment_id" jsonschema:"description=Deployment ID to check for drift (must have been applied)"`
 }
 
 // GetDeploymentStatusParams are the arguments to get_deployment_status.
