@@ -354,3 +354,49 @@ func BenchmarkLoadDag(b *testing.B) {
 		}
 	}
 }
+
+// ── Drift helpers ──
+
+func TestSaveDrift_DriftStatusOf(t *testing.T) {
+	dir := t.TempDir()
+
+	// No drift.json yet — DriftStatusOf returns "".
+	if s := DriftStatusOf(dir); s != "" {
+		t.Fatalf("expected empty status before any check, got %q", s)
+	}
+
+	// Save a clean result.
+	r := &DriftResult{
+		Version:      DriftVersion,
+		DeploymentID: "d-001",
+		CheckedAt:    "2026-09-01T00:00:00Z",
+		Status:       DriftClean,
+	}
+	if err := SaveDrift(dir, r); err != nil {
+		t.Fatal(err)
+	}
+	if s := DriftStatusOf(dir); s != DriftClean {
+		t.Fatalf("expected clean, got %q", s)
+	}
+
+	// Overwrite with drifted.
+	r.Status = DriftDetected
+	r.Changes = []DriftChange{{Address: "t.a", Type: "t", Action: "update"}}
+	if err := SaveDrift(dir, r); err != nil {
+		t.Fatal(err)
+	}
+	if s := DriftStatusOf(dir); s != DriftDetected {
+		t.Fatalf("expected drifted, got %q", s)
+	}
+}
+
+func TestDriftStatusOf_UnreadableReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	// Write invalid JSON — DriftStatusOf returns "" on parse error.
+	if err := os.WriteFile(filepath.Join(dir, "drift.json"), []byte("not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if s := DriftStatusOf(dir); s != "" {
+		t.Fatalf("expected empty for unparseable drift.json, got %q", s)
+	}
+}

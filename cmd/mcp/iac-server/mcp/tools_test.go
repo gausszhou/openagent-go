@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/yusheng-g/openagent-go/cmd/mcp/iac-server/agent"
 	"github.com/yusheng-g/openagent-go/cmd/mcp/iac-server/provider"
+	"github.com/yusheng-g/openagent-go/iac"
 )
 
 // mockCloud is a CloudProvider that returns dummy credentials instead of
@@ -681,6 +683,412 @@ func TestDestroyDeployment_StateGateRejectsAlreadyDestroyed(t *testing.T) {
 	}
 	if !strings.Contains(job.Error, "already destroyed") {
 		t.Fatalf("error should mention 'already destroyed', got: %s", job.Error)
+	}
+}
+
+// ── check_drift ──
+
+// TestCheckDrift_InvalidID verifies the path-traversal guard runs synchronously
+// before the async job is submitted.
+func TestCheckDrift_InvalidID(t *testing.T) {
+	root := t.TempDir()
+	tool := &checkDriftTool{cfg: Config{DeploymentsDir: root, DryRun: true}}
+	for _, id := range []string{"", "..", "../etc", "a/b"} {
+		args, _ := json.Marshal(map[string]string{"deployment_id": id})
+		result := tool.Execute(context.Background(), args)
+		if result.Error == nil {
+			t.Errorf("invalid id %q should be rejected synchronously", id)
+		}
+	}
+}
+
+// TestCheckDrift_StateGateRejectsNonApplied verifies check_drift is rejected
+// when dag.Status is not "applied" — drift only makes sense after apply.
+func TestCheckDrift_StateGateRejectsNonApplied(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"cost_estimated","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	planner := newTestPlanner(t, workDir)
+	tool := &checkDriftTool{cfg: Config{
+		Planner: planner, Cloud: mockCloud{},
+		DeploymentsDir: deploymentsDir, DryRun: true,
+	}}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	if result.Error != nil {
+		t.Fatalf("Execute should return job_id, got error: %v", result.Error)
+	}
+	jobID := extractJobID(t, result.Content)
+
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobFailed {
+		t.Fatalf("check_drift on non-applied dag should fail, got status %s", job.Status)
+	}
+	if !strings.Contains(job.Error, "has not been applied") {
+		t.Fatalf("error should mention 'has not been applied', got: %s", job.Error)
+	}
+}
+
+// TestCheckDrift_StateGateRejectsDestroyed verifies check_drift is rejected
+// when the deployment was already destroyed.
+func TestCheckDrift_StateGateRejectsDestroyed(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"destroyed","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	planner := newTestPlanner(t, workDir)
+	tool := &checkDriftTool{cfg: Config{
+		Planner: planner, Cloud: mockCloud{},
+		DeploymentsDir: deploymentsDir, DryRun: true,
+	}}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	jobID := extractJobID(t, result.Content)
+
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobFailed {
+		t.Fatalf("check_drift on destroyed dag should fail, got status %s", job.Status)
+	}
+	if !strings.Contains(job.Error, "has not been applied") {
+		t.Fatalf("error should mention 'has not been applied', got: %s", job.Error)
+	}
+}
+
+// TestCheckDrift_StateGateRejectsMissingDag verifies check_drift is rejected
+// when dag.json is missing (empty status from DagStatusOf).
+func TestCheckDrift_StateGateRejectsMissingDag(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	// No dag.json — DagStatusOf returns ""
+	planner := newTestPlanner(t, workDir)
+	tool := &checkDriftTool{cfg: Config{
+		Planner: planner, Cloud: mockCloud{},
+		DeploymentsDir: deploymentsDir, DryRun: true,
+	}}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	jobID := extractJobID(t, result.Content)
+
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobFailed {
+		t.Fatalf("check_drift on missing dag should fail, got status %s", job.Status)
+	}
+	if !strings.Contains(job.Error, "has not been applied") {
+		t.Fatalf("error should mention 'has not been applied', got: %s", job.Error)
+	}
+}
+
+// TestCheckDrift_DryRunClean verifies check_drift in dry-run mode returns
+// status "clean" and persists drift.json to disk.
+func TestCheckDrift_DryRunClean(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"applied","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	planner := newTestPlanner(t, workDir)
+	tool := &checkDriftTool{cfg: Config{
+		Planner: planner, Cloud: mockCloud{},
+		DeploymentsDir: deploymentsDir, DryRun: true,
+	}}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	if result.Error != nil {
+		t.Fatalf("Execute should return job_id, got error: %v", result.Error)
+	}
+	jobID := extractJobID(t, result.Content)
+
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobDone {
+		t.Fatalf("check_drift on applied deployment in dry-run should succeed, got status %s (err=%s)", job.Status, job.Error)
+	}
+
+	// Verify the job result content.
+	var driftResult agent.DriftResult
+	if err := json.Unmarshal(job.Result, &driftResult); err != nil {
+		t.Fatalf("parse drift result: %v", err)
+	}
+	if driftResult.Status != agent.DriftClean {
+		t.Errorf("expected status=clean, got %q", driftResult.Status)
+	}
+	if driftResult.Version != agent.DriftVersion {
+		t.Errorf("expected version=%d, got %d", agent.DriftVersion, driftResult.Version)
+	}
+	if driftResult.DeploymentID != "d-001" {
+		t.Errorf("expected deployment_id=d-001, got %q", driftResult.DeploymentID)
+	}
+
+	// Verify drift.json was persisted to disk.
+	driftData, err := os.ReadFile(filepath.Join(depDir, "drift.json"))
+	if err != nil {
+		t.Fatalf("drift.json not written: %v", err)
+	}
+	var onDisk agent.DriftResult
+	if err := json.Unmarshal(driftData, &onDisk); err != nil {
+		t.Fatalf("parse drift.json: %v", err)
+	}
+	if onDisk.Status != agent.DriftClean {
+		t.Errorf("drift.json status = %q, want clean", onDisk.Status)
+	}
+}
+
+// TestCheckDrift_DoesNotInvalidateCost verifies check_drift does not delete
+// cost.json — drift detection does not change the desired state, so the cost
+// estimate remains valid.
+func TestCheckDrift_DoesNotInvalidateCost(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"applied","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	mustWriteFile(t, filepath.Join(depDir, "cost.json"), []byte("{}"))
+	planner := newTestPlanner(t, workDir)
+	tool := &checkDriftTool{cfg: Config{
+		Planner: planner, Cloud: mockCloud{},
+		DeploymentsDir: deploymentsDir, DryRun: true,
+	}}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	jobID := extractJobID(t, result.Content)
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobDone {
+		t.Fatalf("check_drift should succeed, got status %s (err=%s)", job.Status, job.Error)
+	}
+
+	// cost.json must still exist.
+	if !agent.HasCost(depDir) {
+		t.Fatal("check_drift must not invalidate cost.json — cost estimate stays valid")
+	}
+}
+
+// TestCheckDrift_DoesNotChangeDagStatus verifies check_drift does not modify
+// dag.Status — drift is a read-only side observation, not a lifecycle advance.
+func TestCheckDrift_DoesNotChangeDagStatus(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"applied","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	planner := newTestPlanner(t, workDir)
+	tool := &checkDriftTool{cfg: Config{
+		Planner: planner, Cloud: mockCloud{},
+		DeploymentsDir: deploymentsDir, DryRun: true,
+	}}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	jobID := extractJobID(t, result.Content)
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobDone {
+		t.Fatalf("check_drift should succeed, got status %s (err=%s)", job.Status, job.Error)
+	}
+
+	// dag.Status must still be "applied".
+	status := agent.DagStatusOf(depDir)
+	if status != agent.DagApplied {
+		t.Fatalf("dag.Status = %q, want applied — check_drift must not advance the state machine", status)
+	}
+}
+
+// TestListDeployments_DriftStatus verifies list_deployments reports the
+// drift_status field from drift.json.
+func TestListDeployments_DriftStatus(t *testing.T) {
+	root := t.TempDir()
+
+	// d-001: has drift.json with status=clean
+	mustMkdirAll(t, filepath.Join(root, "d-001"))
+	driftJSON := `{"version":1,"deployment_id":"d-001","status":"clean","checked_at":"2026-09-01T00:00:00Z"}`
+	mustWriteFile(t, filepath.Join(root, "d-001", "drift.json"), []byte(driftJSON))
+
+	// d-002: no drift.json — drift_status should be ""
+	mustMkdirAll(t, filepath.Join(root, "d-002"))
+
+	// d-003: has drift.json with status=drifted
+	mustMkdirAll(t, filepath.Join(root, "d-003"))
+	driftJSON2 := `{"version":1,"deployment_id":"d-003","status":"drifted","checked_at":"2026-09-01T00:00:00Z"}`
+	mustWriteFile(t, filepath.Join(root, "d-003", "drift.json"), []byte(driftJSON2))
+
+	tool := &listDeploymentsTool{cfg: Config{DeploymentsDir: root}}
+	result := tool.Execute(context.Background(), nil)
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+
+	var deployments []struct {
+		ID          string `json:"id"`
+		DriftStatus string `json:"drift_status"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &deployments); err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments) != 3 {
+		t.Fatalf("expected 3 deployments, got %d", len(deployments))
+	}
+	want := []struct {
+		ID          string
+		DriftStatus string
+	}{
+		{"d-001", "clean"},
+		{"d-002", ""},
+		{"d-003", "drifted"},
+	}
+	for i, w := range want {
+		if deployments[i].ID != w.ID {
+			t.Errorf("deployment %d id = %q, want %q", i, deployments[i].ID, w.ID)
+		}
+		if deployments[i].DriftStatus != w.DriftStatus {
+			t.Errorf("deployment %s drift_status = %q, want %q", w.ID, deployments[i].DriftStatus, w.DriftStatus)
+		}
+	}
+}
+
+// TestCheckDrift_PlanFnDrifted verifies the non-dry-run DriftDetected branch:
+// when the injected planFn returns a plan with changes, check_drift reports
+// status=drifted and persists the changes to drift.json.
+func TestCheckDrift_PlanFnDrifted(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"applied","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	planner := newTestPlanner(t, workDir)
+
+	// Inject a plan that returns one update change — simulates drift.
+	planFn := func(_ context.Context) (*iac.Plan, error) {
+		return &iac.Plan{
+			Summary: iac.Summary{Update: 1, Noop: 2},
+			Changes: []iac.ResourceChange{
+				{Address: "t.a", Type: "t", Action: iac.ActionUpdate},
+			},
+		}, nil
+	}
+
+	tool := &checkDriftTool{
+		cfg: Config{
+			Planner: planner, Cloud: mockCloud{},
+			DeploymentsDir: deploymentsDir, DryRun: false,
+		},
+		planFn: planFn,
+	}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	if result.Error != nil {
+		t.Fatalf("Execute should return job_id, got error: %v", result.Error)
+	}
+	jobID := extractJobID(t, result.Content)
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobDone {
+		t.Fatalf("check_drift should succeed, got status %s (err=%s)", job.Status, job.Error)
+	}
+
+	var driftResult agent.DriftResult
+	if err := json.Unmarshal(job.Result, &driftResult); err != nil {
+		t.Fatalf("parse drift result: %v", err)
+	}
+	if driftResult.Status != agent.DriftDetected {
+		t.Errorf("expected status=drifted, got %q", driftResult.Status)
+	}
+	if driftResult.Summary.Update != 1 {
+		t.Errorf("expected summary.update=1, got %d", driftResult.Summary.Update)
+	}
+	if len(driftResult.Changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(driftResult.Changes))
+	}
+	if driftResult.Changes[0].Address != "t.a" {
+		t.Errorf("expected change address=t.a, got %q", driftResult.Changes[0].Address)
+	}
+	if driftResult.Changes[0].Action != "update" {
+		t.Errorf("expected change action=update, got %q", driftResult.Changes[0].Action)
+	}
+
+	// Verify drift.json on disk.
+	driftData, err := os.ReadFile(filepath.Join(depDir, "drift.json"))
+	if err != nil {
+		t.Fatalf("drift.json not written: %v", err)
+	}
+	var onDisk agent.DriftResult
+	if err := json.Unmarshal(driftData, &onDisk); err != nil {
+		t.Fatalf("parse drift.json: %v", err)
+	}
+	if onDisk.Status != agent.DriftDetected {
+		t.Errorf("drift.json status = %q, want drifted", onDisk.Status)
+	}
+}
+
+// TestCheckDrift_PlanFnCheckFailed verifies the non-dry-run DriftCheckFailed
+// branch: when the injected planFn returns an error, check_drift persists
+// check_failed to drift.json and returns the error to the caller.
+func TestCheckDrift_PlanFnCheckFailed(t *testing.T) {
+	workDir := t.TempDir()
+	deploymentsDir := filepath.Join(workDir, "deployments")
+	mustMkdirAll(t, deploymentsDir)
+	depDir := filepath.Join(deploymentsDir, "d-001")
+	mustMkdirAll(t, depDir)
+	dagJSON := `{"version":1,"deployment_id":"d-001","status":"applied","nodes":[{"id":"a","type":"t","name":"a"}]}`
+	mustWriteFile(t, filepath.Join(depDir, "dag.json"), []byte(dagJSON))
+	planner := newTestPlanner(t, workDir)
+
+	planFn := func(_ context.Context) (*iac.Plan, error) {
+		return nil, fmt.Errorf("simulated refresh failure: provider timeout")
+	}
+
+	tool := &checkDriftTool{
+		cfg: Config{
+			Planner: planner, Cloud: mockCloud{},
+			DeploymentsDir: deploymentsDir, DryRun: false,
+		},
+		planFn: planFn,
+	}
+
+	args, _ := json.Marshal(map[string]string{"deployment_id": "d-001"})
+	result := tool.Execute(context.Background(), args)
+	jobID := extractJobID(t, result.Content)
+	job := pollJob(t, planner, jobID)
+	if job.Status != agent.JobFailed {
+		t.Fatalf("check_drift should fail on plan error, got status %s", job.Status)
+	}
+	if !strings.Contains(job.Error, "refresh failure") {
+		t.Fatalf("error should contain the plan error, got: %s", job.Error)
+	}
+
+	// Verify drift.json persisted with check_failed.
+	driftData, err := os.ReadFile(filepath.Join(depDir, "drift.json"))
+	if err != nil {
+		t.Fatalf("drift.json not written: %v", err)
+	}
+	var onDisk agent.DriftResult
+	if err := json.Unmarshal(driftData, &onDisk); err != nil {
+		t.Fatalf("parse drift.json: %v", err)
+	}
+	if onDisk.Status != agent.DriftCheckFailed {
+		t.Errorf("drift.json status = %q, want check_failed", onDisk.Status)
+	}
+	if !strings.Contains(onDisk.Error, "refresh failure") {
+		t.Errorf("drift.json error should contain the plan error, got: %q", onDisk.Error)
 	}
 }
 
