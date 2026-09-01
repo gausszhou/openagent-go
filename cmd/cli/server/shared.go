@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -547,6 +548,17 @@ func setupTelemetry(ctx context.Context, cfg config.Config) (*otelhooks.TracerHo
 
 // ── Settings hot-reload ──
 
+// ReloadResult describes what happened during a reload — returned by
+// reload() and surfaced to the agent/user via the `reload` action so they
+// can see what was applied (vs. the opaque "hot-reloaded if a server is
+// running" message).
+type ReloadResult struct {
+	Applied    []string // changes applied (e.g. "log level: info→trace")
+	Skipped    []string // changes skipped (e.g. "sandbox.enabled: restart required")
+	Violations []string // enum violations found (reload blocked if non-empty)
+	ParseError string   // non-empty if the config failed to parse
+}
+
 // settingsWatcher holds the state needed to hot-reload settings.json at
 // runtime: the previous config (for diffing), the TracerHolder (for
 // telemetry reconfiguration), and the ACP AgentServer (for model registry
@@ -561,10 +573,45 @@ type settingsWatcher struct {
 	srv        *acp.AgentServer // nil in REST/run mode
 }
 
+// activeWatcher is the process-wide settings watcher, set when the server
+// starts. The settings tool's `reload` action uses it to trigger an
+// immediate reload (vs. waiting for the 500ms fsnotify debounce). nil when
+// no server is running (CLI mode, or before watchSettings starts).
+//
+// atomic.Pointer provides happens-before synchronization between the writer
+// (watchSettings goroutine) and readers (settings tool reload action in ACP
+// session goroutines) — a plain global var would be a data race.
+var activeWatcher atomic.Pointer[settingsWatcher]
+
+// onExternalChange is called by the fsnotify watcher when settings.json
+// changes. In ACP mode, it broadcasts a <system-reminder> to all sessions
+// so the model can decide whether to reload. In REST mode (no srv), it
+// falls back to auto-reload (no model to notify).
+//
+// The notification is sent for ALL file changes, including writes by the
+// settings tool itself. The model is smart enough to ignore the notification
+// when it just called set+reload (it knows the change was its own). This
+// avoids the need for a suppression flag (which would be a workaround with
+// a race window: if an external edit happens within the 500ms debounce
+// after a tool write, the flag would swallow it).
+func (sw *settingsWatcher) onExternalChange(ctx context.Context) {
+	if sw.srv != nil {
+		// ACP: notify the model, let it decide whether to reload.
+		sw.srv.BroadcastSystemReminder(kernel.FormatSettingsChangeNote())
+	} else {
+		// REST: no sessions/model to notify — auto-reload.
+		sw.reload(ctx)
+	}
+}
+
 // watchSettings starts an fsnotify watcher on the settings file. When the
-// file changes, it debounces 500ms then reloads and applies the new config.
-// Returns immediately; runs until ctx is cancelled.
+// file changes, it debounces 500ms then either notifies the model (ACP) or
+// auto-reloads (REST). Returns immediately; runs until ctx is cancelled.
 func watchSettings(ctx context.Context, sw *settingsWatcher) {
+	// Register as the process-wide watcher so the settings tool's `reload`
+	// action can trigger an immediate reload.
+	activeWatcher.Store(sw)
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Warn("settings watcher: fsnotify init failed", "error", err)
@@ -602,7 +649,7 @@ func watchSettings(ctx context.Context, sw *settingsWatcher) {
 				debounce.Stop()
 			}
 			debounce = time.AfterFunc(500*time.Millisecond, func() {
-				sw.reload(ctx)
+				sw.onExternalChange(ctx)
 			})
 		case err := <-w.Errors:
 			slog.Warn("settings watcher error", "error", err)
@@ -611,38 +658,94 @@ func watchSettings(ctx context.Context, sw *settingsWatcher) {
 }
 
 // reload reads the new settings.json, parses it, diffs against the previous
-// config, and applies changes to telemetry/log-level/models. Unloadable
-// fields (sandbox, capabilities) are logged as warnings.
-func (sw *settingsWatcher) reload(ctx context.Context) {
+// config, and applies changes to telemetry/log-level/models. Returns a
+// ReloadResult describing what was applied/skipped. Called by the fsnotify
+// watcher (auto) and by the settings tool's `reload` action (explicit).
+func (sw *settingsWatcher) reload(ctx context.Context) ReloadResult {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	var result ReloadResult
+
 	raw, err := os.ReadFile(sw.cfgPath)
 	if err != nil {
+		result.ParseError = fmt.Sprintf("cannot read file: %v", err)
 		slog.Warn("settings reload: cannot read file", "error", err)
-		return
+		return result
+	}
+	// Resolve env-var references before unmarshaling, identical to startup
+	// (main.go). Warnings (vars referenced without a default that are unset)
+	// are logged: a reload is debounced (500ms), so each intentional edit
+	// produces at most one warning per unset var — not spam. This matches
+	// startup behavior and surfaces misconfigured env refs introduced via
+	// hot-reload (e.g. a newly added ${NEW_VAR} that the operator forgot to
+	// export). Both sw.prev and newCfg end up expanded, so the
+	// reflect.DeepEqual diff below compares resolved values.
+	raw, reloadWarns := config.ExpandBytes(raw)
+	for _, w := range reloadWarns {
+		slog.Warn("settings reload: env var referenced but not set", "var", w)
 	}
 	var newCfg config.Config
 	if err := json.Unmarshal(raw, &newCfg); err != nil {
+		result.ParseError = fmt.Sprintf("parse failed: %v", err)
 		slog.Warn("settings reload: parse failed, keeping previous config", "error", err)
-		return
+		return result
 	}
 	config.ApplyDefaults(&newCfg, sw.cfgPath)
+
+	// Validate-gated reload: if the new config introduces NEW enum violations
+	// (violations not present in the previously-accepted config), skip the
+	// reload and keep the previous config. The running server stays on the
+	// last-known-good config rather than silently degrading.
+	//
+	// Only NEW violations block the reload: if the server started with an
+	// existing violation (startup warns but does not fatal), a subsequent
+	// reload that changes an unrelated field (e.g. telemetry) should NOT be
+	// blocked by the pre-existing violation — the operator's edit is
+	// orthogonal. Differencing against sw.prev avoids this trap. Pre-existing
+	// violations are re-logged (info) so they stay visible.
+	newViolations := config.CheckEnums(&newCfg)
+	prevViolations := config.CheckEnums(sw.prev)
+	prevSet := make(map[string]struct{}, len(prevViolations))
+	for _, pv := range prevViolations {
+		prevSet[pv] = struct{}{}
+	}
+	var fresh []string
+	for _, v := range newViolations {
+		if _, ok := prevSet[v]; !ok {
+			fresh = append(fresh, v)
+		}
+	}
+	if len(fresh) > 0 {
+		result.Violations = fresh
+		for _, v := range fresh {
+			slog.Warn("settings reload: new validation violation, keeping previous config", "violation", v)
+		}
+		return result
+	}
+	// No new violations. Re-log any pre-existing ones so the operator is
+	// reminded they're still present (the server is running with them).
+	for _, v := range newViolations {
+		slog.Warn("settings reload: pre-existing violation still present (not blocking)", "violation", v)
+	}
 
 	// Telemetry.
 	if !reflect.DeepEqual(sw.prev.Telemetry, newCfg.Telemetry) {
 		sw.reconfigureTelemetry(ctx, newCfg)
+		result.Applied = append(result.Applied, "telemetry reconfigured")
 	}
 
 	// Log level.
 	if sw.prev.Log.Level != newCfg.Log.Level {
 		reconfigureLogLevel(newCfg.Log.Level)
+		result.Applied = append(result.Applied, fmt.Sprintf("log level: %s→%s", sw.prev.Log.Level, newCfg.Log.Level))
 		slog.Info("settings reloaded: log level", "level", newCfg.Log.Level)
 	}
 
 	// Providers/models (ACP only — REST/run have no AgentServer).
 	if sw.srv != nil && !reflect.DeepEqual(sw.prev.Provider, newCfg.Provider) {
 		sw.reconfigureModels(newCfg)
+		result.Applied = append(result.Applied, fmt.Sprintf("providers (disk): %d→%d — note: model registry is additive-only (deleted providers stay in memory until restart; new sessions can still use them)", len(sw.prev.Provider), len(newCfg.Provider)))
 	}
 
 	// MCP servers (ACP only). Settings servers are merged with client-
@@ -650,11 +753,16 @@ func (sw *settingsWatcher) reload(ctx context.Context) {
 	// only (existing sessions keep their connected tools).
 	if sw.srv != nil && !reflect.DeepEqual(sw.prev.McpServers, newCfg.McpServers) {
 		sw.srv.SetSettingsMcpServers(convertMcpServers(newCfg.McpServers))
+		result.Applied = append(result.Applied, fmt.Sprintf("mcp servers: %d→%d (new sessions)", len(sw.prev.McpServers), len(newCfg.McpServers)))
 		slog.Info("settings reloaded: mcp servers", "count", len(newCfg.McpServers))
 	}
 
 	sw.prev = &newCfg
+	if len(result.Applied) == 0 {
+		result.Applied = append(result.Applied, "no hot-reloadable changes (restart may be required for non-reloadable fields)")
+	}
 	slog.Info("settings reloaded")
+	return result
 }
 
 // reconfigureTelemetry shuts down the old TracerProvider and creates a new

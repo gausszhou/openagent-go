@@ -27,67 +27,66 @@ import (
 type settingsTool struct{}
 
 type settingsParams struct {
-	Action string `json:"action" jsonschema:"description=Operation: set|get|list|append|delete"`
-	Key    string `json:"key,omitempty" jsonschema:"description=Dotted-path key (e.g. telemetry.endpoint, provider.openai.apikey, mcp_servers.weather.command). Required for set/get/append/delete; ignored for list. Numeric segments index into arrays (e.g. provider.openai.models.0.id)."`
-	Value  string `json:"value,omitempty" jsonschema:"description=Value for set/append. Parsed as JSON when valid (number/bool/object/array); otherwise treated as a plain string. Ignored for get/list/delete."`
+	Action string `json:"action" jsonschema:"description=Operation: set|get|list|append|delete|validate|reload|schema"`
+	Key    string `json:"key,omitempty" jsonschema:"description=Dotted-path key (e.g. telemetry.endpoint, provider.openai.api_key, mcp_servers.weather.command). Required for set/get/append/delete; ignored for list/validate/reload/schema. Numeric segments index into arrays (e.g. provider.openai.models.0.id)."`
+	Value  string `json:"value,omitempty" jsonschema:"description=Value for set/append. Parsed as JSON when valid (number/bool/object/array); otherwise treated as a plain string. For secrets (api_key, token, secret), PREFER ${ENV_VAR} over a literal value so the key is resolved from env at runtime and the on-disk file stays literal. Ignored for get/list/delete/validate/reload/schema."`
 }
 
 func (t *settingsTool) Definition() openagent.FunctionDefinition {
 	return openagent.FunctionDefinition{
 		Name: "settings",
-		Description: "Read and modify the agent's settings.json configuration (providers, models, telemetry, log level, mcp_servers, capabilities, sandbox, etc.). " +
-			"DO NOT proactively modify settings unless the user explicitly asks to change runtime configuration. " +
-			"Legitimate use cases are narrow: adding/removing an MCP server (mcp_servers.*), changing the model/provider (provider.*, model), adjusting log level (log.level), or enabling telemetry (telemetry.*). " +
-			"For anything else (capabilities, sandbox, embedding, channels, env, ...), tell the user to edit settings.json and restart — those are NOT hot-reloadable. " +
-			"\n\n" +
-			"BEFORE any write, call action=list first to see the current state and the file path — never assume a key exists or guess its shape. " +
-			"\n\n" +
-			"Actions: set <key> <value>, get <key>, list, append <key> <value> (to an array), delete <key>. " +
-			"Keys are dotted paths (telemetry.endpoint, provider.openai.apikey, mcp_servers.<name>.command, log.level). " +
-			"\n\n" +
-			"SCHEMA (the three hot-reloadable groups — map/object keys are NAMES, never array indices):\n" +
-			`{
-  "provider": {                        // OBJECT keyed by provider name, NOT an array
+		Description: "Read and modify the agent's settings.json configuration. " +
+			"DO NOT proactively modify settings unless the user explicitly asks. " +
+			"Actions: set <key> <value>, get <key>, list, append <key> <value>, delete <key>, validate, reload, schema. " +
+			"BEFORE any write, call list to see current state. Call schema for the full config structure, valid values, and type rules. " +
+			"Workflow: set (write) → validate (check) → reload (apply). Writes do NOT auto-apply — always call reload to activate changes. " +
+			"delete is IRREVERSIBLE — the key is removed from disk immediately, no undo. Before calling delete, tell the user what will be removed and ask for confirmation. If a provider or mcp_servers entry is deleted, running sessions may lose their model or tools. " +
+			"For secrets (api_key/token/secret), prefer ${ENV_VAR} over literal values. NEVER display secret values in replies.",
+		Parameters: openagent.SchemaOf[settingsParams](),
+	}
+}
+
+// settingsSchemaDoc is the detailed schema reference returned by the
+// `schema` action. Kept out of the tool Description so the description stays
+// short for the model's context window — the agent fetches this on demand.
+const settingsSchemaDoc = `CONFIG SCHEMA (hot-reloadable groups — object keys are NAMES, never array indices):
+
+{
+  "provider": {                        // OBJECT keyed by provider name
     "openai": {
-      "api_key": "sk-...",
+      "api_key": "sk-...",             // or ${ENV_VAR} (preferred for secrets)
       "base_url": "https://api.openai.com/v1",
       "models": ["gpt-4o", {"id": "qwen-128k", "max_input_tokens": 128000, "max_output_tokens": 8192, "input_cost_per_million": 1, "input_cache_cost_per_million": 0.1, "output_cost_per_million": 2}]
     }
   },
-  "mcp_servers": {                     // OBJECT keyed by server name, NOT an array
+  "mcp_servers": {                     // OBJECT keyed by server name
     "weather": {"command": "uvx", "args": ["mcp-server-weather"], "env": {"API_KEY": "..."}},
     "remote1": {"url": "https://...", "type": "http"}
   },
-  "telemetry": {                       // OTel trace export; empty endpoint = disabled
-    "endpoint": "localhost:4318",      // bare host:port (RECOMMENDED). Also accepts a full URL
-                                       //   "http://localhost:4318" or "https://collector:4318/otlp"
-                                       //   — but NEVER pass a bare URL scheme to protocol; pick ONE form.
-    "protocol": "http",                // "http" (default) | "grpc" — pairs with a bare host:port endpoint
+  "telemetry": {
+    "endpoint": "localhost:4318",      // bare host:port OR full URL "http(s)://..."
+    "protocol": "http",                // "http" (default) | "grpc"
     "service_name": "openagent",
-    "insecure": true                   // bool; true for plain HTTP collectors (default). Ignored when
-                                       //   endpoint is a full URL — the URL scheme governs TLS then.
+    "insecure": true                   // bool; ignored when endpoint is a full URL
   },
   "log": {"file": "...", "level": "info", "max_size": 10, "max_backups": 5, "max_age": 30}
 }
-TYPE RULES (a type-mismatched write is REJECTED before save — the file stays untouched):
-- provider and mcp_servers MUST be objects keyed by name; an array ([{...}]) is rejected.
-- provider.<name>.models entries accept a plain string OR an object, never a bare number.
-- mcp_servers.<name>.type: only "stdio" (default/empty) | "http" | "sse"; anything else (e.g. "remote") falls back to stdio and fails.
-- log.level: only "trace" | "debug" | "info" | "warn" | "error".
-- telemetry.endpoint: bare "host:port" (e.g. "localhost:4318", pairs with protocol+insecure) OR a full URL "http(s)://host[:port][/path]". Do NOT combine a full-URL endpoint with protocol/insecure — the URL's scheme already carries both.` +
-			"\n\n" +
-			"MECHANISM: writes are atomic (temp file + rename, never a half-written file) and validated against the Config schema before save — a type-mismatched value (e.g. log.level=123) is rejected, the file is not touched. A running server watches the file via fsnotify and hot-reloads within ~500ms. " +
-			fmt.Sprintf("FILE LOCATIONS: settings.json is at %s. %s", config.Path(), logLocationClause()) +
-			"HOT-RELOAD (no restart): telemetry.*, log.level, provider.* (models), mcp_servers.* — mcp_servers affects new/reloaded sessions; active sessions keep their connected tools. " +
-			"RESTART-REQUIRED: sandbox.*, capabilities.*, embedding.*, openviking.*, context_providers.*, sensitive.*, channels.*, server.*, env, plugins, default_mode, tui.* — changing these is a silent no-op until restart; tell the user. " +
-			"\n\n" +
-			"PLUGIN-INJECTED KEYS: WASM plugins (see the `plugins` array from list) may inject or override keys at startup. get/list reads the DISK file only — plugin-injected values are NOT visible. If a key is plugin-managed, set writes the disk value but the plugin's value may still win at runtime. " +
-			"DESTRUCTIVE: deleting a provider.* entry can remove the only model (all turns fail until re-added); deleting mcp_servers.* drops a server other sessions depend on. JSON corruption is NOT possible (atomic + validated), but review with list before deleting. " +
-			"\n\n" +
-			"Use this INSTEAD of hand-editing settings.json with the write tool. Typical MCP add: set mcp_servers.<name>.command <bin> (plus .args/.env/.url/.type as needed).",
-		Parameters: openagent.SchemaOf[settingsParams](),
-	}
-}
+
+TYPE RULES (type-mismatched writes are REJECTED before save):
+- provider/mcp_servers MUST be objects keyed by name; arrays are rejected.
+- provider.<name>.models: plain string OR object, never bare number.
+- mcp_servers.<name>.type: "stdio" (default) | "http" | "sse" (case-sensitive).
+- log.level: "trace" | "debug" | "info" | "warn" | "error" (case-insensitive).
+- telemetry.protocol: "http" | "grpc" (case-insensitive).
+- default_mode/tui.mode: "auto" | "manual" | "plan" (case-sensitive).
+- sandbox.network: "host" | "isolated" (case-sensitive).
+
+HOT-RELOAD (no restart): telemetry.*, log.level, provider.* (models), mcp_servers.*.
+RESTART-REQUIRED: sandbox.*, capabilities.*, embedding.*, openviking.*, context_providers.*, sensitive.*, channels.*, server.*, env, plugins, default_mode, tui.*.
+
+SECRETS: fields tagged sensitive (provider.*.api_key, channels.*.token/secret/app_secret, embedding.api_key, openviking.api_key). Prefer ${ENV_VAR} — disk stays literal, server resolves from env.
+
+MECHANISM: atomic writes (temp+rename), validated against Config schema before save.`
 
 func (t *settingsTool) Execute(ctx context.Context, args json.RawMessage) *openagent.ToolResult {
 	p, err := openagent.ParseArgs[settingsParams](args)
@@ -103,7 +102,14 @@ func (t *settingsTool) Execute(ctx context.Context, args json.RawMessage) *opena
 		if err := config.SetSetting(p.Key, p.Value); err != nil {
 			return openagent.ErrorResult(fmt.Errorf("settings set: %w", err), true, "")
 		}
-		return &openagent.ToolResult{Content: fmt.Sprintf("set %s = %s (hot-reloaded if a server is running)", p.Key, p.Value)}
+		msg := fmt.Sprintf("set %s = %s. Call reload to apply.", p.Key, p.Value)
+		// If the key is a secret field and the value is a literal (not a
+		// ${ENV_VAR} reference), prompt the agent to use env-var indirection
+		// so the key is not stored in plaintext on disk.
+		if isSecretKey(p.Key) && !looksLikeEnvRef(p.Value) {
+			msg += "\nTIP: this looks like a secret written as a literal value. Consider using ${ENV_VAR} instead (e.g. set " + p.Key + " ${MY_API_KEY}) — the on-disk file stays literal and the key is resolved from env at runtime. Export the env var in your shell or .env file."
+		}
+		return &openagent.ToolResult{Content: msg}
 	case "get":
 		if strings.TrimSpace(p.Key) == "" {
 			return openagent.ErrorResult(fmt.Errorf("settings get: key is required"), false, "")
@@ -126,7 +132,7 @@ func (t *settingsTool) Execute(ctx context.Context, args json.RawMessage) *opena
 		if err := config.AppendSetting(p.Key, p.Value); err != nil {
 			return openagent.ErrorResult(fmt.Errorf("settings append: %w", err), true, "")
 		}
-		return &openagent.ToolResult{Content: fmt.Sprintf("appended to %s (hot-reloaded if a server is running)", p.Key)}
+		return &openagent.ToolResult{Content: fmt.Sprintf("appended to %s. Call reload to apply.", p.Key)}
 	case "delete":
 		if strings.TrimSpace(p.Key) == "" {
 			return openagent.ErrorResult(fmt.Errorf("settings delete: key is required"), false, "")
@@ -134,9 +140,53 @@ func (t *settingsTool) Execute(ctx context.Context, args json.RawMessage) *opena
 		if err := config.DeleteSetting(p.Key); err != nil {
 			return openagent.ErrorResult(fmt.Errorf("settings delete: %w", err), true, "")
 		}
-		return &openagent.ToolResult{Content: fmt.Sprintf("deleted %s (hot-reloaded if a server is running)", p.Key)}
+		return &openagent.ToolResult{Content: fmt.Sprintf("deleted %s. Call reload to apply.", p.Key)}
+	case "validate":
+		report, err := config.ValidateSettings()
+		if err != nil {
+			return openagent.ErrorResult(fmt.Errorf("settings validate: %w", err), false, "")
+		}
+		var msg string
+		if len(report.Warnings) == 0 && len(report.EnumViolations) == 0 {
+			msg = "settings.json is valid (no warnings, no violations)"
+		} else {
+			parts := []string{"settings.json validation report:"}
+			if len(report.Warnings) > 0 {
+				parts = append(parts, fmt.Sprintf("%d unset env var(s): %s", len(report.Warnings), strings.Join(report.Warnings, ", ")))
+			}
+			if len(report.EnumViolations) > 0 {
+				parts = append(parts, fmt.Sprintf("%d enum violation(s): %s", len(report.EnumViolations), strings.Join(report.EnumViolations, "; ")))
+			}
+			msg = strings.Join(parts, " ")
+		}
+		return &openagent.ToolResult{Content: msg}
+	case "reload":
+		// Explicit reload: validates then applies the on-disk settings
+		// immediately (no 500ms debounce wait). Returns what was applied
+		// so the agent can confirm the change took effect — this is the
+		// explicit "apply" step after set (write) + validate (check).
+		sw := activeWatcher.Load()
+		if sw == nil {
+			return openagent.ErrorResult(fmt.Errorf("settings reload: no server running (reload is only available when a server is live)"), false, "")
+		}
+		result := sw.reload(ctx)
+		var parts []string
+		if result.ParseError != "" {
+			parts = append(parts, "reload FAILED: "+result.ParseError)
+			parts = append(parts, "previous config kept")
+		} else if len(result.Violations) > 0 {
+			parts = append(parts, "reload BLOCKED by validation violations:")
+			parts = append(parts, result.Violations...)
+			parts = append(parts, "previous config kept")
+		} else {
+			parts = append(parts, "reload OK. Applied:")
+			parts = append(parts, result.Applied...)
+		}
+		return &openagent.ToolResult{Content: strings.Join(parts, "\n")}
+	case "schema":
+		return &openagent.ToolResult{Content: settingsSchemaDoc}
 	default:
-		return openagent.ErrorResult(fmt.Errorf("settings: unknown action %q (want set|get|list|append|delete)", action), false, "")
+		return openagent.ErrorResult(fmt.Errorf("settings: unknown action %q (want set|get|list|append|delete|validate|reload|schema)", action), false, "")
 	}
 }
 
@@ -144,6 +194,31 @@ func (t *settingsTool) Execute(ctx context.Context, args json.RawMessage) *opena
 // scoped to a session cwd) because settings.json is a global file.
 func newSettingsTool() openagent.Tool {
 	return &settingsTool{}
+}
+
+// isSecretKey reports whether the dotted key path targets a field tagged
+// `sensitive:"true"` in the Config struct tree. Used to prompt the agent to
+// use ${ENV_VAR} instead of a literal value, keeping secrets off disk.
+// Tag-driven: adding `sensitive:"true"` to a new field automatically makes
+// it recognized here — no edits to this file needed.
+func isSecretKey(key string) bool {
+	return config.IsSecretKey(key)
+}
+
+// looksLikeEnvRef reports whether the value is an env-var reference
+// (${VAR}, ${VAR:-default}, $VAR) rather than a literal. Used to skip the
+// "use ${ENV_VAR}" tip when the agent is already using one.
+func looksLikeEnvRef(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, "${") || strings.HasPrefix(trimmed, "$") {
+		// Distinguish $VAR from a literal $ — check the char after $.
+		if trimmed == "$" {
+			return false
+		}
+		next := trimmed[1]
+		return next == '{' || (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') || next == '_'
+	}
+	return false
 }
 
 // logLocationClause returns the log-file sentence for the tool description,

@@ -31,3 +31,25 @@ func FormatSubAgentNote(agentID, description, result, stopReason string) string 
 	b.WriteString("\n</system-reminder>")
 	return b.String()
 }
+
+// FormatSettingsChangeNote renders a settings-changed notification as a
+// <system-reminder> block. Delivered to the model via triggerIdleTurn when
+// fsnotify detects a change to settings.json. The model decides whether to
+// call the settings tool's reload action.
+//
+// This notification fires for ALL file changes, including writes by the
+// settings tool itself (set/append/delete). The text explicitly tells the
+// model to check its own recent actions — if it just called set/append/delete
+// and reload, it should ignore this notification (the change was its own).
+// This avoids the need for a suppression flag (which would race with
+// concurrent external edits).
+func FormatSettingsChangeNote() string {
+	return "<system-reminder>\n" +
+		"[SETTINGS CHANGED]\n" +
+		"settings.json was modified. " +
+		"If YOU just called set/append/delete on the settings tool, this is your own write — " +
+		"you already called reload, so IGNORE this notification. " +
+		"Only call action=reload if you did NOT just modify settings yourself " +
+		"(someone else edited the file).\n" +
+		"</system-reminder>"
+}

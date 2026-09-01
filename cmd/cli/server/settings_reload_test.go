@@ -123,8 +123,103 @@ func TestReload_AddsFileDeclaredProvider(t *testing.T) {
 	sw.reload(ctx)
 
 	if !containsModel(srv, "openai/gpt-4o") {
-		t.Errorf("file-declared model openai/gpt-4o was not added by reload — "+
+		t.Errorf("file-declared model openai/gpt-4o was not added by reload — " +
 			"the SetModel add/update pass must still run")
+	}
+}
+
+// TestReload_PreExistingViolationDoesNotBlockUnrelatedChange verifies the
+// validate-gated reload does NOT block an unrelated change when the config
+// already had a pre-existing enum violation at startup. Scenario:
+//   - startup accepts log.level="BOGUS" (warns but does not fatal)
+//   - operator edits telemetry (unrelated) and saves
+//   - reload fires: CheckEnums finds "BOGUS" but it's pre-existing (in sw.prev)
+//   - the telemetry change MUST still be applied
+//
+// Pre-fix (blocking on ALL violations), the pre-existing "BOGUS" would block
+// the telemetry reload — the operator's unrelated edit is held hostage.
+func TestReload_PreExistingViolationDoesNotBlockUnrelatedChange(t *testing.T) {
+	ctx := context.Background()
+	srv := acp.NewAgentServer(agent.New("test"), kernel.Deps{}, nil, nil)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "settings.json")
+	// Startup config has a pre-existing violation: log.level="BOGUS".
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"log": {"level": "BOGUS"},
+		"telemetry": {"endpoint": "localhost:4318", "protocol": "http"}
+	}`), 0644); err != nil {
+		t.Fatalf("write base settings: %v", err)
+	}
+
+	// Seed sw.prev with the same config (including the BOGUS violation) —
+	// mirroring startup accepting it.
+	prevCfg := &config.Config{}
+	prevCfg.Log.Level = "BOGUS"
+	prevCfg.Telemetry = config.TelemetryConfig{
+		Endpoint: "localhost:4318",
+		Protocol: "http",
+	}
+	sw := &settingsWatcher{
+		cfgPath: cfgPath,
+		prev:    prevCfg,
+		srv:     srv,
+	}
+
+	// Rewrite: keep the BOGUS (pre-existing), change telemetry endpoint.
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"log": {"level": "BOGUS"},
+		"telemetry": {"endpoint": "localhost:4319", "protocol": "http"}
+	}`), 0644); err != nil {
+		t.Fatalf("write changed settings: %v", err)
+	}
+
+	sw.reload(ctx)
+
+	// The reload MUST have applied: sw.prev should now have the new endpoint.
+	if sw.prev.Telemetry.Endpoint != "localhost:4319" {
+		t.Errorf("unrelated telemetry change was blocked by pre-existing BOGUS violation: "+
+			"prev endpoint = %q, want localhost:4319", sw.prev.Telemetry.Endpoint)
+	}
+}
+
+// TestReload_NewViolationBlocksReload verifies that a NEWLY introduced enum
+// violation (not in sw.prev) DOES block the reload — the running server
+// stays on the previous (valid) config.
+func TestReload_NewViolationBlocksReload(t *testing.T) {
+	ctx := context.Background()
+	srv := acp.NewAgentServer(agent.New("test"), kernel.Deps{}, nil, nil)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "settings.json")
+	// Startup config is valid.
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"log": {"level": "info"}
+	}`), 0644); err != nil {
+		t.Fatalf("write base settings: %v", err)
+	}
+
+	prevCfg := &config.Config{}
+	prevCfg.Log.Level = "info"
+	sw := &settingsWatcher{
+		cfgPath: cfgPath,
+		prev:    prevCfg,
+		srv:     srv,
+	}
+
+	// Rewrite: introduce a NEW violation (log.level="BOGUS").
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"log": {"level": "BOGUS"}
+	}`), 0644); err != nil {
+		t.Fatalf("write changed settings: %v", err)
+	}
+
+	sw.reload(ctx)
+
+	// The reload MUST have been blocked: sw.prev should still have "info".
+	if sw.prev.Log.Level != "info" {
+		t.Errorf("new violation did not block reload: prev log.level = %q, want info",
+			sw.prev.Log.Level)
 	}
 }
 

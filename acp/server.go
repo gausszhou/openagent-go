@@ -1560,6 +1560,23 @@ func (s *AgentServer) BroadcastConfigOptions() {
 	}
 }
 
+// BroadcastSystemReminder sends a <system-reminder> to every active session
+// via triggerIdleTurn. Used by the settings watcher to notify the model that
+// settings.json was externally modified — the model then decides whether to
+// call the settings tool's reload action. No-op when no turn trigger is
+// wired (CLI mode) or no sessions exist.
+func (s *AgentServer) BroadcastSystemReminder(text string) {
+	s.mu.Lock()
+	ids := make([]openacp.SessionId, 0, len(s.sessions))
+	for sid := range s.sessions {
+		ids = append(ids, sid)
+	}
+	s.mu.Unlock()
+	for _, sid := range ids {
+		s.triggerIdleTurn(sid, text)
+	}
+}
+
 // availableCommands returns the slash commands this agent advertises.
 func (s *AgentServer) availableCommands() []openacp.AvailableCommand {
 	cmds := s.cmdRegistry.Available()

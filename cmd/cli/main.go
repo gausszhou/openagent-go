@@ -43,7 +43,15 @@ func main() {
 		raw = []byte("{}")
 	}
 	var preCfg config.Config
-	if err := json.Unmarshal(raw, &preCfg); err != nil {
+	// Expand env-var references before parsing: the on-disk file may contain
+	// raw-mode tokens (unquoted ${PORT}) that are invalid JSON until ExpandBytes
+	// resolves them. Only .Plugins is read here (the plugin paths), so the
+	// expanded bytes are used solely to locate plugins — no secret exposure.
+	// `raw` itself stays literal so loadPlugins (main.go:86) receives the
+	// unexpanded bytes and the final ExpandBytes at main.go:96 resolves the
+	// complete merged document once.
+	preExpanded, _ := config.ExpandBytes(raw)
+	if err := json.Unmarshal(preExpanded, &preCfg); err != nil {
 		log.Fatalf("parse settings: %v", err)
 	}
 	if len(preCfg.Plugins) > 0 {
@@ -88,6 +96,15 @@ func main() {
 	}
 
 	// 5. Parse final merged config.
+	// Resolve environment-variable references in the raw JSON bytes before
+	// unmarshaling: "${API_KEY}" → string value, unquoted ${PORT} → raw
+	// JSON token (int/bool/null). loadPlugins merged raw bytes above, so
+	// plugin-injected ${...} references are resolved here too. The on-disk
+	// file stays literal; only the running process holds resolved secrets.
+	settings, warns := config.ExpandBytes(settings)
+	for _, w := range warns {
+		slog.Warn("settings: env var referenced but not set", "var", w)
+	}
 	var cfg config.Config
 	if err := json.Unmarshal(settings, &cfg); err != nil {
 		log.Fatalf("parse merged settings: %v", err)
@@ -98,6 +115,16 @@ func main() {
 	// Defaults come from the single source (config.ApplyDefaults) — the
 	// plugin-merged settings parse cannot use config.Load directly.
 	config.ApplyDefaults(&cfg, cfgPath)
+
+	// Enum validation (same check as reload + `settings validate`). At
+	// startup we WARN but do not fatal — the server can still run with a
+	// silent downgrade (e.g. log.level="BOGUS" → info). Surfacing it here
+	// means the operator knows immediately, and the reload gate (shared.go)
+	// can diff against these pre-existing violations to avoid blocking
+	// unrelated changes on a config that was already accepted at startup.
+	for _, v := range config.CheckEnums(&cfg) {
+		slog.Warn("settings: enum violation (use-time will silently downgrade)", "violation", v)
+	}
 
 	logCleanup, err := server.SetupLog(cfg.Log)
 	if err != nil {
@@ -498,6 +525,28 @@ func buildSettingsCmd() *cobra.Command {
 				return fmt.Errorf("settings delete: %w", err)
 			}
 			fmt.Fprintf(os.Stderr, "deleted %s\n", args[0])
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "validate",
+		Short: "Validate settings.json (env refs resolve, config parses, enums valid)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report, err := config.ValidateSettings()
+			if report != nil {
+				for _, w := range report.Warnings {
+					fmt.Fprintf(os.Stderr, "WARN: env var %q referenced but not set\n", w)
+				}
+				for _, v := range report.EnumViolations {
+					fmt.Fprintf(os.Stderr, "WARN: %s\n", v)
+				}
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "OK: settings.json is valid")
 			return nil
 		},
 	})

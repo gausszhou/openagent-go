@@ -28,7 +28,15 @@ func UpdateSettings(fn func(raw map[string]json.RawMessage) error) error {
 
 	raw := map[string]json.RawMessage{}
 	if data, rerr := os.ReadFile(Path()); rerr == nil {
-		if err := json.Unmarshal(data, &raw); err != nil {
+		// Normalize raw-mode ${VAR} tokens (unquoted, outside strings) into
+		// sentinel-marked quoted strings so encoding/json can parse the doc.
+		// Without this, a settings.json with {"port": ${PORT}} is invalid
+		// JSON and every SetSetting/AppendSetting/DeleteSetting call (and
+		// every credential writer) fails at the Unmarshal below. The
+		// sentinel is stripped back to raw tokens before writing to disk
+		// (DenormalizeRawRefs below), so the on-disk file stays literal.
+		norm := NormalizeRawRefs(data)
+		if err := json.Unmarshal(norm, &raw); err != nil {
 			return fmt.Errorf("settings parse: %w", err)
 		}
 	} else if !os.IsNotExist(rerr) {
@@ -40,6 +48,13 @@ func UpdateSettings(fn func(raw map[string]json.RawMessage) error) error {
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("settings marshal: %w", err)
+	}
+	// Restore raw-mode tokens: strip the sentinel + quotes so the on-disk
+	// file keeps its literal {"port": ${PORT}} form. The in-memory tree held
+	// sentinel-marked strings; the disk must hold the raw token.
+	data, err = DenormalizeRawRefs(data)
+	if err != nil {
+		return fmt.Errorf("settings denormalize: %w", err)
 	}
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return fmt.Errorf("settings dir: %w", err)
@@ -163,20 +178,36 @@ func deleteNestedAny(node any, path []string) (any, bool) {
 // GetSetting reads a nested key from the on-disk settings.json (not the
 // in-memory merged config — plugin-injected values are not visible here).
 // Returns the value as a pretty-printed JSON string. Numeric segments
-// index into arrays.
+// index into arrays. Returns the LITERAL on-disk value: a raw-mode ${PORT}
+// token is returned as "${PORT}" (quoted string), never resolved to the
+// secret — and never showing the internal sentinel marker.
 func GetSetting(key string) (string, error) {
 	raw, err := os.ReadFile(Path())
 	if err != nil {
 		return "", fmt.Errorf("settings read: %w", err)
 	}
+	// Normalize so the parser accepts raw-mode tokens, then navigate.
 	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := json.Unmarshal(NormalizeRawRefs(raw), &data); err != nil {
 		return "", fmt.Errorf("settings parse: %w", err)
 	}
 	path := strings.Split(key, ".")
 	val, ok := getNestedAny(data, path)
 	if !ok {
 		return "", fmt.Errorf("key %q not found", key)
+	}
+	// Strip the sentinel from the returned value so the user sees the literal
+	// "${PORT}", not the internal marker bytes. For a top-level string value
+	// (the common case: GetSetting("server.port")), StripSentinel handles it
+	// directly. For composite values (GetSetting("server") → object,
+	// GetSetting("models") → array), stripSentinelInTree recurses into the
+	// subtree and strips the sentinel from every string within — matching
+	// ListSettings's behavior so the two read paths are symmetric.
+	switch v := val.(type) {
+	case string:
+		val = StripSentinel(v)
+	case map[string]any, []any:
+		stripSentinelInTree(val)
 	}
 	b, err := json.MarshalIndent(val, "", "  ")
 	if err != nil {
@@ -186,24 +217,54 @@ func GetSetting(key string) (string, error) {
 }
 
 // ListSettings returns the full on-disk settings.json as pretty-printed
-// JSON.
+// JSON. Returns the LITERAL on-disk values: raw-mode ${PORT} tokens appear
+// as "${PORT}" (quoted strings), never resolved and never showing the
+// internal sentinel marker.
 func ListSettings() (string, error) {
 	raw, err := os.ReadFile(Path())
 	if err != nil {
 		return "", fmt.Errorf("settings read: %w", err)
 	}
+	// Normalize so the parser accepts raw-mode tokens.
 	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := json.Unmarshal(NormalizeRawRefs(raw), &data); err != nil {
 		return "", fmt.Errorf("settings parse: %w", err)
 	}
 	if len(data) == 0 {
 		return "{}", nil
 	}
+	// Walk the tree and strip the sentinel from every string value so the
+	// user sees literal raw tokens, not the internal marker.
+	stripSentinelInTree(data)
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("settings list: marshal: %w", err)
 	}
 	return string(b), nil
+}
+
+// stripSentinelInTree recursively strips the rawSentinel prefix from every
+// string value in a deserialized JSON tree (map[string]any / []any). Used by
+// ListSettings so the user-visible output never leaks the internal marker.
+func stripSentinelInTree(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, child := range t {
+			if s, ok := child.(string); ok {
+				t[k] = StripSentinel(s)
+			} else {
+				stripSentinelInTree(child)
+			}
+		}
+	case []any:
+		for i, child := range t {
+			if s, ok := child.(string); ok {
+				t[i] = StripSentinel(s)
+			} else {
+				stripSentinelInTree(child)
+			}
+		}
+	}
 }
 
 // ── internal: any-based JSON tree navigation ──
@@ -237,9 +298,35 @@ func mutateSettings(fn func(doc map[string]any) error) error {
 		// or fails to start on next boot (log.Fatalf). Reject it now so
 		// the on-disk file is never left in a semantically broken state.
 		// Unknown keys are tolerated (Config uses omitempty + no DisallowUnknownFields).
+		//
+		// newData contains sentinel-marked raw tokens (e.g. server.port is
+		// the string "<sentinel>${PORT}"). To validate the SEMANTIC content
+		// (would the resolved config parse into Config?), we denormalize to
+		// restore raw ${PORT} tokens, then ExpandBytes to resolve them —
+		// exactly what startup (main.go) and reload (shared.go) do. Without
+		// this, a raw-mode int field (${PORT} → string) would falsely fail
+		// the probe on a type mismatch.
+		literalForProbe, derr := DenormalizeRawRefs(newData)
+		if derr != nil {
+			return fmt.Errorf("settings: denormalize for probe: %w", derr)
+		}
+		probeData, _ := ExpandBytes(literalForProbe)
 		var probe Config
-		if err := json.Unmarshal(newData, &probe); err != nil {
+		if err := json.Unmarshal(probeData, &probe); err != nil {
 			return fmt.Errorf("settings: validation failed (would break config parse): %w", err)
+		}
+		// Parse the sentinel-marked newData (valid JSON) back into the raw
+		// map. UpdateSettings will Marshal raw and DenormalizeRawRefs before
+		// writing to disk, restoring the literal raw tokens.
+		//
+		// CRITICAL: clear the map first. json.Unmarshal MERGES into an
+		// existing map — it does not delete keys absent from newData. So a
+		// DeleteSetting that removed a key from doc (and thus from newData)
+		// would be silently undone: the stale key would survive in raw and
+		// get written back to disk. Clearing and repopulating ensures raw
+		// is an exact reflection of the mutated doc.
+		for k := range raw {
+			delete(raw, k)
 		}
 		return json.Unmarshal(newData, &raw)
 	})
