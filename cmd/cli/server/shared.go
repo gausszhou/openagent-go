@@ -596,7 +596,11 @@ var activeWatcher atomic.Pointer[settingsWatcher]
 // after a tool write, the flag would swallow it).
 func (sw *settingsWatcher) onExternalChange(ctx context.Context) {
 	if sw.srv != nil {
-		// ACP: notify the model, let it decide whether to reload.
+		// ACP: notify all active sessions via idle turn. triggerIdleTurn
+		// sends an "idle_turn_end" session/update after the turn ends so
+		// the frontend re-enables user input (same pattern as
+		// context_compacting / available_skills_update — a custom
+		// session/update subtype).
 		sw.srv.BroadcastSystemReminder(kernel.FormatSettingsChangeNote())
 	} else {
 		// REST: no sessions/model to notify — auto-reload.

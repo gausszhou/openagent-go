@@ -555,7 +555,27 @@ func (m *mux) triggerTurn(sid SessionId, text string) {
 		Prompt:    []ContentBlock{{Type: "text", Text: text}},
 	}
 	sender := &promptSender{m: m, sid: sid}
-	_, _ = m.handler.OnPrompt(ctx, req, sender)
+	resp, _ := m.handler.OnPrompt(ctx, req, sender)
+
+	// Idle turns (system-reminders, sub-agent completions) have no client
+	// request, so handlePrompt's writeResult (JSON-RPC response with
+	// stopReason) never fires. The frontend only recognizes end-turn via
+	// that response, so without a signal it stays stuck in "running".
+	//
+	// Send an "idle_turn_end" session/update with the stopReason. This is
+	// a custom session/update subtype (same pattern as context_compacting,
+	// available_skills_update, etc.) — the frontend handles it to
+	// re-enable user input. Unrecognized subtypes are silently ignored per
+	// ACP spec, so older clients that don't handle it are unaffected (they
+	// just don't get the end-turn signal for idle turns — same as today).
+	stopReason := StopReasonEndTurn
+	if resp != nil && resp.StopReason != "" {
+		stopReason = resp.StopReason
+	}
+	sender.send(SessionUpdate{
+		SessionUpdate: "idle_turn_end",
+		Meta:          map[string]any{"stopReason": stopReason},
+	})
 }
 
 func (m *mux) handleCancel(msg jsonrpcMessage) {
