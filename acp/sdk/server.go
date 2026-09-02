@@ -555,7 +555,10 @@ func (m *mux) triggerTurn(sid SessionId, text string) {
 		Prompt:    []ContentBlock{{Type: "text", Text: text}},
 	}
 	sender := &promptSender{m: m, sid: sid}
-	resp, _ := m.handler.OnPrompt(ctx, req, sender)
+	resp, err := m.handler.OnPrompt(ctx, req, sender)
+	if err != nil {
+		slog.Warn("idle turn failed", "session", sid, "error", err)
+	}
 
 	// Idle turns (system-reminders, sub-agent completions) have no client
 	// request, so handlePrompt's writeResult (JSON-RPC response with
