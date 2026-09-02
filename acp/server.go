@@ -1600,15 +1600,6 @@ func (s *AgentServer) availableCommands() []openacp.AvailableCommand {
 // are unaffected by cwd.
 func (s *AgentServer) buildSessionSkillProvider(cwd string) skill.Provider {
 	var roots []fs.RootEntry
-	// global: ~/.agents/skills
-	if home, err := os.UserHomeDir(); err == nil {
-		d := filepath.Join(home, ".agents", "skills")
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
-			roots = append(roots, fs.RootEntry{Path: d, Type: "global"})
-		}
-	}
-	// project: <session-cwd>/.agents/skills
-	//
 	// Always register this root (do NOT os.Stat it at session-creation
 	// time). The directory may not exist yet — the user may install a
 	// skill later via npx/CLI, which creates <cwd>/.agents/skills. If we
@@ -1616,6 +1607,13 @@ func (s *AgentServer) buildSessionSkillProvider(cwd string) skill.Provider {
 	// (which calls Discover on the already-built roots) will never scan
 	// the new directory. Discover handles a missing directory gracefully
 	// (returns no skills from that root).
+
+	// global: ~/.agents/skills
+	if home, err := os.UserHomeDir(); err == nil {
+		d := filepath.Join(home, ".agents", "skills")
+		roots = append(roots, fs.RootEntry{Path: d, Type: "global"})
+	}
+	// project: <session-cwd>/.agents/skills
 	if cwd != "" {
 		d := filepath.Join(cwd, ".agents", "skills")
 		roots = append(roots, fs.RootEntry{Path: d, Type: "project"})
