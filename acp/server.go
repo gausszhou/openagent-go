@@ -1608,11 +1608,17 @@ func (s *AgentServer) buildSessionSkillProvider(cwd string) skill.Provider {
 		}
 	}
 	// project: <session-cwd>/.agents/skills
+	//
+	// Always register this root (do NOT os.Stat it at session-creation
+	// time). The directory may not exist yet — the user may install a
+	// skill later via npx/CLI, which creates <cwd>/.agents/skills. If we
+	// skip the root when the dir is absent at creation, reload_skills
+	// (which calls Discover on the already-built roots) will never scan
+	// the new directory. Discover handles a missing directory gracefully
+	// (returns no skills from that root).
 	if cwd != "" {
 		d := filepath.Join(cwd, ".agents", "skills")
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
-			roots = append(roots, fs.RootEntry{Path: d, Type: "project"})
-		}
+		roots = append(roots, fs.RootEntry{Path: d, Type: "project"})
 	}
 	embedFS := builtinskills.BuiltinFS()
 	if len(roots) == 0 && embedFS == nil {
