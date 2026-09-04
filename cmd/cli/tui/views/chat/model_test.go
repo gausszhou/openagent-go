@@ -1165,6 +1165,60 @@ func TestMessageCardsPerRole(t *testing.T) {
 	}
 }
 
+// TestThoughtAndToolTextSitOnSurface verifies the styled body spans render
+// on the card surface, not on the page background: BaseStyle drags
+// BgNormal into the card, which painted a black band behind the thinking
+// text and tool lines (the surface only showed around the band).
+func TestThoughtAndToolTextSitOnSurface(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 40
+	m.inChat = true
+	vpW := layout.GetViewWidth(100)
+
+	thought := ChatMessage{Role: "thought", Content: "checking the request", TurnId: 1}
+	block, _ := m.renderMessageBlock(0, thought, vpW)
+	// The label (Warning orange) and the body (TextStone) must both pair
+	// their foreground with the surface background.
+	if !strings.Contains(block, "38;2;255;159;10;48;2;28;28;28") {
+		t.Errorf("thinking label should render on the surface bg:\n%s", utils.StripANSI(block))
+	}
+	if !strings.Contains(block, "38;2;110;110;115;48;2;28;28;28") {
+		t.Errorf("thinking text should render on the surface bg:\n%s", utils.StripANSI(block))
+	}
+
+	tool := ChatMessage{Role: "tool", ToolName: "bash", ToolStatus: toolDone, ToolInput: "ls", TurnId: 1}
+	block, _ = m.renderMessageBlock(1, tool, vpW)
+	if !strings.Contains(block, "38;2;110;110;115;48;2;28;28;28") {
+		t.Errorf("tool line should render on the surface bg:\n%s", utils.StripANSI(block))
+	}
+}
+
+// TestMessageCardPaddingSymmetric verifies the card's inner padding is
+// symmetric: a rail-only pad row frames the text above and below (the old
+// top-0/bottom-1 padding made text hug the card's top edge while the
+// bottom got a surface strip).
+func TestMessageCardPaddingSymmetric(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 40
+	m.inChat = true
+	vpW := layout.GetViewWidth(100)
+	block, _ := m.renderMessageBlock(0, ChatMessage{Role: "user", Content: "hi", TurnId: 1}, vpW)
+	rows := strings.Split(utils.StripANSI(block), "\n")
+	// The block is margin + pad + text + pad + margin for a one-line body.
+	if len(rows) != 5 {
+		t.Fatalf("card should be margin + pad + text + pad + margin, got %d rows:\n%q", len(rows), rows)
+	}
+	railOnly := func(row string) bool { return strings.Trim(row, " ") == "┃" }
+	if !railOnly(rows[1]) || !railOnly(rows[3]) {
+		t.Errorf("expected rail-only pad rows framing the text, got %q / %q", rows[1], rows[3])
+	}
+	if !strings.Contains(rows[2], "hi") {
+		t.Errorf("middle row should carry the text, got %q", rows[2])
+	}
+}
+
 func TestLongAssistantRowsFitViewport(t *testing.T) {
 	// Long CJK answers must wrap inside the card's content area; the
 	// markdown renderer wraps at content width so no row overflows the
@@ -1928,8 +1982,8 @@ func TestToolOutputDefaultFoldsAtFiveLines(t *testing.T) {
 // Render output does not end with a newline, so blocks were joined without
 // one — the first card's bottom margin merged with the next card's top
 // margin into one line twice the viewport width (background leaks, spacing
-// doubled). Each 4-line card (margin, body, bottom pad, margin — no top
-// pad) must keep exactly one newline between blocks.
+// doubled). Each 5-line card (margin, top pad, body, bottom pad, margin)
+// must keep exactly one newline between blocks.
 func TestMessageBlocksSeparatedByNewline(t *testing.T) {
 	m := newTestModel()
 	m.width = 100
@@ -1940,8 +1994,8 @@ func TestMessageBlocksSeparatedByNewline(t *testing.T) {
 	}
 	out := m.renderMessages()
 	lines := strings.Split(out, "\n")
-	if len(lines) != 8 {
-		t.Fatalf("two 4-line cards should render 8 lines, got %d:\n%s", len(lines), utils.StripANSI(out))
+	if len(lines) != 10 {
+		t.Fatalf("two 5-line cards should render 10 lines, got %d:\n%s", len(lines), utils.StripANSI(out))
 	}
 	for i, ln := range lines {
 		if w := lipgloss.Width(ln); w > 97 {
@@ -1959,10 +2013,11 @@ func TestAssistantCardNoLeadingBlank(t *testing.T) {
 	m.height = 30
 	m.messages = []ChatMessage{{Role: "assistant", Content: "# Hi\n\nbody text"}}
 	lines := strings.Split(m.renderMessages(), "\n")
-	// Card layout without top padding: line 0 is the margin (blank), so the
-	// first visible card row is line 1 — it must carry content.
-	if len(lines) < 2 || strings.TrimSpace(utils.StripANSI(lines[1])) == "" {
-		t.Errorf("assistant card starts with a blank row — leading markdown padding leaked:\n%s",
+	// Card layout: line 0 is the margin, line 1 the (intentional) top pad
+	// row, so the first content row is line 2 — it must carry text. A blank
+	// there means glamour's own leading blank leaked through.
+	if len(lines) < 3 || strings.TrimSpace(utils.StripANSI(lines[2])) == "" {
+		t.Errorf("assistant card content row is blank — leading markdown padding leaked:\n%s",
 			utils.StripANSI(strings.Join(lines, "\n")))
 	}
 }

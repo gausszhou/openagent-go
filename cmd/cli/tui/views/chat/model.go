@@ -2136,15 +2136,14 @@ func messageRoleBorder(role string) color.Color {
 // messageCard wraps body in the standard transcript block: a surface card
 // with a role-colored left border. The border column shares the card
 // background so the rail reads as part of the block instead of a black
-// gutter. The card keeps inner padding on the right, bottom, and left, but
-// NOT on top — a top pad would add a stray empty "┃" row above every
-// message; vertical rhythm comes from the 1-row margins around the card.
-// vpW is the total card width; a Width(vpW) style renders to the viewport
-// width including border and padding.
+// gutter. Inner padding is symmetric (top and bottom 1) so the text floats
+// evenly inside the card; vertical rhythm between cards comes from the
+// 1-row margins around the card. vpW is the total card width; a Width(vpW)
+// style renders to the viewport width including border and padding.
 func messageCard(vpW int, border color.Color, body string) string {
 	return theme.BaseStyle().
 		Margin(1, 0).MarginBackground(theme.BgNormal).
-		Padding(0, 1, 1, 1).
+		Padding(1, 1, 1, 1).
 		Width(vpW).
 		Background(theme.BgSurface).
 		Border(lipgloss.ThickBorder(), false, false, false, true).
@@ -2171,11 +2170,14 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 			return "", true
 		}
 		if content != "" {
-			body := theme.BaseStyle().Foreground(theme.Warning).Italic(true).Render("Thinking: ") +
-				theme.BaseStyle().Foreground(theme.TextStone).Render(content)
+			// The spans must carry the card surface explicitly: BaseStyle
+			// would drag the page background (BgNormal) under the text and
+			// paint a black band across the card.
+			body := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.Warning).Italic(true).Render("Thinking: ") +
+				theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextStone).Render(content)
 			return messageCard(vpW, messageRoleBorder("thought"), body), false
 		} else if m.loading {
-			body := theme.BaseStyle().Foreground(theme.Warning).Italic(true).Render("Thinking...")
+			body := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.Warning).Italic(true).Render("Thinking...")
 			return messageCard(vpW, messageRoleBorder("thought"), body), false
 		}
 		return "", true
@@ -2203,8 +2205,10 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
 			out = "\n" + foldOutput(msg.ToolOutput, defaultToolOutputLines)
 		}
-		body := theme.BaseStyle().Foreground(theme.TextStone).Render(line) +
-			theme.BaseStyle().Foreground(theme.TextAsh).Render(out)
+		// Same surface rule as the thought card: BaseStyle's page background
+		// would paint a black band under the tool line inside the card.
+		body := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextStone).Render(line) +
+			theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh).Render(out)
 		return messageCard(vpW, messageRoleBorder("tool"), body), false
 	case "error":
 		return messageCard(vpW, messageRoleBorder("error"), content), false
