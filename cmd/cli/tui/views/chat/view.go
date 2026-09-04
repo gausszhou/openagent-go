@@ -560,14 +560,19 @@ func (m *Model) inputBoxX() int {
 func panelFooter(base lipgloss.Style, contentW int, bg color.Color) string {
 	// RenderCommandTipOn renders a leading space before every pair; the
 	// first pair must not carry one, so the footer's text starts flush with
-	// the popup's title and rows (opencode-style shared left edge).
+	// the popup's title and rows (opencode-style shared left edge). The
+	// whole line is nudged 1 column right to match the rows' inner padding.
 	first := base.Foreground(theme.TextNormal).Render("↑ ↓") + base.Foreground(theme.TextAsh).Render(" switch")
 	footerText := lipgloss.JoinHorizontal(lipgloss.Left,
+		base.Render(" "),
 		first,
 		components.RenderCommandTipOn("⏎", "run", bg),
 		components.RenderCommandTipOn("esc", "close", bg),
 	)
-	return base.MaxWidth(contentW).Render(footerText)
+	// Width (not MaxWidth) fills the line out to contentW with the popup
+	// surface: MaxWidth only clips, so the tail past the text was plain
+	// spaces showing the terminal's own background through the popup.
+	return base.Width(contentW).Render(footerText)
 }
 
 // ── borderless popups ──
@@ -585,14 +590,16 @@ func (m *Model) popupBase() (lipgloss.Style, int) {
 
 // popupHeader renders the popup title row: "title" left, an optional live
 // filter (already styled) beside it, and "esc" right, spanned to contentW.
+// A leading pad aligns the title with the option rows' inner text (every
+// row carries 1-column horizontal padding inside its fill).
 func popupHeader(base lipgloss.Style, contentW int, title, filter string) string {
 	titleS := base.Foreground(theme.TextNormal).Bold(true).Render(title)
 	escS := base.Foreground(theme.TextMute).Render("esc")
 	// A soft space keeps a live filter from gluing to the title
 	// ("Searcha" would read like a typo).
 	filterS := base.Render(" ") + filter
-	gap := max(0, contentW-lipgloss.Width(titleS)-lipgloss.Width(filterS)-lipgloss.Width(escS))
-	return base.Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left, titleS, filterS, base.Width(gap).Render(""), escS))
+	gap := max(0, contentW-1-lipgloss.Width(titleS)-lipgloss.Width(filterS)-lipgloss.Width(escS))
+	return base.Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left, base.Render(" "), titleS, filterS, base.Width(gap).Render(""), escS))
 }
 
 // popupFrame wraps a popup body in the borderless panel surface with a
@@ -746,11 +753,12 @@ func (m *Model) renderSlashPanel() string {
 func (m *Model) paletteRows(base lipgloss.Style, contentW int, cmds []panelCommand, panelIdx int) []string {
 	// Fixed-column rows: slash column + description column. The slash
 	// column is padded to a constant width (always keeping one separator
-	// space) so every description starts at the same offset.
+	// space) so every description starts at the same offset. Both budgets
+	// live inside the row's 1-column horizontal padding.
 	nameCol := 24
-	descCol := contentW - nameCol
+	descCol := contentW - 2 - nameCol
 	if descCol < 10 {
-		nameCol = max(0, contentW-10)
+		nameCol = max(0, contentW-12)
 		descCol = 10
 	}
 	var rows []string
@@ -758,7 +766,8 @@ func (m *Model) paletteRows(base lipgloss.Style, contentW int, cmds []panelComma
 		selected := i == panelIdx
 		// The selected row is a full-width peach block (CommandActive), the
 		// same treatment as the slash sheet; every part shares the fill so no
-		// surface-colored seam shows.
+		// surface-colored seam shows. The row's horizontal padding keeps the
+		// text off the fill's edges.
 		rowStyle := base
 		nameFg, descFg := theme.TextAsh, theme.TextMute
 		if selected {
@@ -772,7 +781,7 @@ func (m *Model) paletteRows(base lipgloss.Style, contentW int, cmds []panelComma
 		row := lipgloss.JoinHorizontal(lipgloss.Left,
 			rowStyle.Foreground(nameFg).Render(pc.slash), namePad,
 			rowStyle.Foreground(descFg).Render(descText))
-		rows = append(rows, rowStyle.Width(contentW).Render(row))
+		rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(row))
 	}
 	return rows
 }
@@ -793,15 +802,15 @@ func (m *Model) renderSessionPanel() string {
 	var rows []string
 	switch {
 	case m.sessionsLoading:
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("Loading...")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("Loading...")))
 	case len(m.sessionItems) == 0:
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("No sessions")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("No sessions")))
 	default:
 		first, last := m.windowPanelRows(len(m.sessionItems))
 		for i, it := range m.sessionItems[first:last] {
 			// No marker column: like every popup row, the name starts on the
-			// left edge, flush with the title and footer; selection is the
-			// full-row CommandActive fill. The last-update time rides the
+			// shared left edge (1 column of inner row padding); selection is
+			// the full-row CommandActive fill. The last-update time rides the
 			// right edge in muted text (ink on the selected row).
 			rowStyle := base
 			nameFg, tsFg := theme.TextAsh, theme.TextMute
@@ -810,12 +819,12 @@ func (m *Model) renderSessionPanel() string {
 				nameFg, tsFg = theme.TextInk, theme.TextInk
 			}
 			ts := relativeTime(time.Now(), it.updated)
-			nameBudget := contentW - 4
+			nameBudget := contentW - 6 // inner width minus the 2 row-pad columns
 			if ts != "" {
 				nameBudget -= lipgloss.Width(ts) + 2
 			}
 			name := utils.TruncateByWidth(it.title, max(8, nameBudget))
-			gap := max(0, contentW-lipgloss.Width(name)-lipgloss.Width(ts))
+			gap := max(0, contentW-2-lipgloss.Width(name)-lipgloss.Width(ts))
 			cells := []string{rowStyle.Foreground(nameFg).Render(name)}
 			if ts != "" {
 				cells = append(cells,
@@ -825,7 +834,7 @@ func (m *Model) renderSessionPanel() string {
 			} else {
 				cells = append(cells, rowStyle.Render(strings.Repeat(" ", gap)))
 			}
-			rows = append(rows, rowStyle.Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left, cells...)))
+			rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left, cells...)))
 		}
 	}
 	return m.popupPanel("Sessions", "", rows)
@@ -870,7 +879,7 @@ func (m *Model) renderModelPanel() string {
 	opts := m.modelOptions()
 	var rows []string
 	if len(opts) == 0 {
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("No model options")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("No model options")))
 	} else {
 		first, last := m.windowPanelRows(len(opts))
 		for i, id := range opts[first:last] {
@@ -880,9 +889,10 @@ func (m *Model) renderModelPanel() string {
 				rowStyle = base.Background(theme.CommandActive)
 				nameFg = theme.TextInk
 			}
-			name := utils.TruncateByWidth(id, contentW-4)
-			pad := max(0, contentW-lipgloss.Width(name))
-			rows = append(rows, rowStyle.Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left,
+			// The name lives inside the row's 1-column horizontal padding.
+			name := utils.TruncateByWidth(id, contentW-6)
+			pad := max(0, contentW-2-lipgloss.Width(name))
+			rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left,
 				rowStyle.Foreground(nameFg).Render(name),
 				rowStyle.Render(strings.Repeat(" ", pad)),
 			)))
@@ -902,7 +912,7 @@ func (m *Model) renderConfigPanel() string {
 	var rows []string
 	opts := m.configPickerOptions(m.configPickerID)
 	if len(opts) == 0 {
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("No options")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("No options")))
 	}
 	for i, opt := range opts {
 		rowStyle := base
@@ -913,12 +923,12 @@ func (m *Model) renderConfigPanel() string {
 		}
 		name := utils.TruncateByWidth(opt.name, 12)
 		// The description budget accounts for the name column (fixed at 14
-		// cells) plus inner padding, so a long description can never wrap
-		// the row into two lines.
-		desc := utils.TruncateByWidth(opt.desc, max(8, contentW-14-6))
+		// cells) plus inner padding and the row's 2 padding columns, so a
+		// long description can never wrap the row into two lines.
+		desc := utils.TruncateByWidth(opt.desc, max(8, contentW-14-8))
 		pad := max(0, 14-lipgloss.Width(name))
-		gap := max(0, contentW-lipgloss.Width(name)-pad-lipgloss.Width(desc))
-		rows = append(rows, rowStyle.Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left,
+		gap := max(0, contentW-2-lipgloss.Width(name)-pad-lipgloss.Width(desc))
+		rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left,
 			rowStyle.Foreground(nameFg).Render(name),
 			rowStyle.Render(strings.Repeat(" ", pad)),
 			rowStyle.Foreground(descFg).Render(desc),
@@ -945,14 +955,14 @@ func (m *Model) renderExportPanel() string {
 		for {
 			r := []rune(ln)
 			if len(r) <= contentW-2 {
-				rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextAsh).Render(ln)))
+				rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextAsh).Render(ln)))
 				break
 			}
-			rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextAsh).Render(string(r[:contentW-2]))))
+			rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextAsh).Render(string(r[:contentW-2]))))
 			ln = string(r[contentW-2:])
 		}
 	}
-	footer := base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("any key closes"))
+	footer := base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("any key closes"))
 	return m.popupPanelStyled(base, contentW, "Export", "", rows, footer)
 }
 
@@ -972,7 +982,7 @@ func (m *Model) renderHelpPanel() string {
 	}
 	var rows []string
 	for _, ln := range lines {
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextAsh).Render(ln)))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextAsh).Render(ln)))
 	}
 	return m.popupPanel("Help", "", rows)
 }
@@ -991,22 +1001,22 @@ func (m *Model) renderSearchPanel() string {
 	var rows []string
 	switch {
 	case m.panelFilter == "":
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("Type to search the transcript...")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("Type to search the transcript...")))
 	case len(m.searchResults) == 0:
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("No matches for \""+m.panelFilter+"\"")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("No matches for \""+m.panelFilter+"\"")))
 	default:
 		first, last := m.windowPanelRows(len(m.searchResults))
 		for i, mi := range m.searchResults[first:last] {
 			src := m.messages[mi]
 			snippet := src.Role + ": " + utils.TruncateByWidth(
-				strings.Join(strings.Split(utils.UnifiedEndOfLine(src.Content), "\n")[:1], ""), contentW-2)
+				strings.Join(strings.Split(utils.UnifiedEndOfLine(src.Content), "\n")[:1], ""), contentW-4)
 			rowStyle := base
 			fg := theme.TextAsh
 			if first+i == m.panelIdx {
 				rowStyle = base.Background(theme.CommandActive)
 				fg = theme.TextInk
 			}
-			rows = append(rows, rowStyle.Width(contentW).Render(rowStyle.Foreground(fg).Render(snippet)))
+			rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(rowStyle.Foreground(fg).Render(snippet)))
 		}
 	}
 	return m.popupPanel("Search", filter, rows)
@@ -1021,7 +1031,7 @@ func (m *Model) renderEditPanel() string {
 	idxs := m.editableMessages()
 	var rows []string
 	if len(idxs) == 0 {
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("No user messages to edit")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("No user messages to edit")))
 	} else {
 		shown := idxs
 		if len(shown) > 20 {
@@ -1030,17 +1040,17 @@ func (m *Model) renderEditPanel() string {
 		first, last := m.windowPanelRows(len(shown))
 		for i, mi := range shown[first:last] {
 			firstLine := strings.Split(utils.UnifiedEndOfLine(m.messages[mi].Content), "\n")[0]
-			snippet := utils.TruncateByWidth("user: "+firstLine, contentW-2)
+			snippet := utils.TruncateByWidth("user: "+firstLine, contentW-4)
 			rowStyle := base
 			fg := theme.TextAsh
 			if first+i == m.panelIdx {
 				rowStyle = base.Background(theme.CommandActive)
 				fg = theme.TextInk
 			}
-			rows = append(rows, rowStyle.Width(contentW).Render(rowStyle.Foreground(fg).Render(snippet)))
+			rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(rowStyle.Foreground(fg).Render(snippet)))
 		}
 		if len(idxs) > 20 {
-			rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render(fmt.Sprintf("… %d older", len(idxs)-20))))
+			rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render(fmt.Sprintf("… %d older", len(idxs)-20))))
 		}
 	}
 	return m.popupPanel("Edit message", "", rows)
@@ -1053,7 +1063,7 @@ func (m *Model) renderPluginsPanel() string {
 
 	var rows []string
 	if len(m.pluginItems) == 0 {
-		rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("No plugins installed")))
+		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextMute).Render("No plugins installed")))
 	} else {
 		first, last := m.windowPanelRows(len(m.pluginItems))
 		for i, p := range m.pluginItems[first:last] {
@@ -1063,7 +1073,7 @@ func (m *Model) renderPluginsPanel() string {
 				rowStyle = base.Background(theme.CommandActive)
 				fg = theme.TextInk
 			}
-			rows = append(rows, rowStyle.Width(contentW).Render(rowStyle.Foreground(fg).Render(utils.TruncateByWidth(p, contentW-2))))
+			rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(rowStyle.Foreground(fg).Render(utils.TruncateByWidth(p, contentW-4))))
 		}
 	}
 	return m.popupPanel("Plugins", "", rows)

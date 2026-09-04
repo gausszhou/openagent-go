@@ -2191,6 +2191,32 @@ func TestMarkdownTableCellsCarrySurfaceBG(t *testing.T) {
 	}
 }
 
+// TestPopupLinesPaintFullWidth guards the popup surface: every text line of
+// a borderless popup (header, option rows, footer) must paint an explicit
+// background out to the full popup width. The footer used MaxWidth, which
+// only clips — its tail past the text stayed unpainted and showed the
+// terminal's own background through the popup.
+func TestPopupLinesPaintFullWidth(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 30
+	m.panelOpen = true
+	m.panelMode = panelModeModels
+	out := m.renderModelPanel()
+	if !strings.Contains(utils.StripANSI(out), "esc") {
+		t.Fatalf("models popup did not render:\n%s", utils.StripANSI(out))
+	}
+	for i, ln := range strings.Split(out, "\n") {
+		if strings.TrimSpace(utils.StripANSI(ln)) == "" {
+			continue // blank separator rows carry no text
+		}
+		if h := missingBG(ln); len(h) > 0 {
+			t.Errorf("popup line %d has %d unpainted cells (first at %v):\n%s",
+				i+1, len(h), h[:min(6, len(h))], utils.StripANSI(ln))
+		}
+	}
+}
+
 // ── transcript search (/search) ──
 
 func TestSearchPanelOpensAndFilters(t *testing.T) {
