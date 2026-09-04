@@ -2188,35 +2188,26 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 	return e.block, e.skip
 }
 
-// messageRoleBorder returns the transcript rail color for a role. Every
-// message type keeps its own left-border identity: user input is blue, the
-// agent's reply is neutral light gray, thoughts are orange, tool activity is
-// muted dark gray, and errors are red.
+// messageRoleBorder returns the transcript rail color for a role. The rail
+// card is the user's prompt alone (the opencode look); the color keeps the
+// user's blue identity.
 func messageRoleBorder(role string) color.Color {
 	switch role {
 	case "user":
 		return theme.Primary
-	case "assistant":
-		return theme.TextAsh
-	case "thought":
-		return theme.Warning
-	case "tool":
-		return theme.TextStone
-	case "error":
-		return theme.Danger
 	default:
 		return theme.BorderGray
 	}
 }
 
-// messageCard wraps body in the standard transcript block: a surface card
-// with a role-colored left border. The border column shares the card
-// background so the rail reads as part of the block instead of a black
-// gutter. Inner padding is symmetric (top and bottom 1) so the text floats
-// evenly inside the card; vertical rhythm comes from a single 1-row margin
-// below each card (no top margin), so adjacent cards sit exactly one blank
-// row apart. vpW is the total card width; a Width(vpW) style renders to the
-// viewport width including border and padding.
+// messageCard wraps body in the transcript's only card: the user's prompt
+// rail — a surface block with a role-colored left border. The border column
+// shares the card background so the rail reads as part of the block instead
+// of a black gutter. Inner padding is symmetric (top and bottom 1) so the
+// text floats evenly inside the card; vertical rhythm comes from a single
+// 1-row margin below each card (no top margin), so adjacent cards sit
+// exactly one blank row apart. vpW is the total card width; a Width(vpW)
+// style renders to the viewport width including border and padding.
 func messageCard(vpW int, border color.Color, body string) string {
 	return theme.BaseStyle().
 		MarginBottom(1).MarginBackground(theme.BgNormal).
@@ -2229,11 +2220,23 @@ func messageCard(vpW int, border color.Color, body string) string {
 		Render(body)
 }
 
-// thoughtSummary renders the collapsed one-liner. The span carries the card
-// surface explicitly — same rule as the expanded card: BaseStyle would drag
-// the page background under the text and paint a black band on the card.
-func thoughtSummary(s string) string {
-	return theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.Warning).Italic(true).Render(s)
+// transcriptIndent is the left indent of the cardless agent-side blocks —
+// the opencode look: only the user's prompt is a card; assistant prose,
+// thoughts and tool rows sit straight on the page, indented 3.
+const transcriptIndent = 3
+
+// indentedBlock renders a cardless transcript block: the body's lines are
+// indented by transcriptIndent page-background columns, with one blank
+// margin row at the bottom (the inter-message gap). Lines arrive styled by
+// the caller; the pad cells carry the page background so no cell falls to
+// an unpainted default.
+func indentedBlock(body string) string {
+	pad := theme.BaseStyle().Render(strings.Repeat(" ", transcriptIndent))
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		lines[i] = pad + ln
+	}
+	return strings.Join(append(lines, ""), "\n")
 }
 
 // formatThoughtDuration renders a thinking span as a compact duration:
@@ -2273,39 +2276,12 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 	case "user":
 		return messageCard(vpW, messageRoleBorder("user"), content), false
 	case "assistant":
-		// The card reserves one column for the border and one cell of
-		// padding each side, so markdown must wrap to the content width
-		// (vpW-3) or its lines overflow the card and clip.
-		body := renderMarkdownText(content, vpW-3)
-		return messageCard(vpW, messageRoleBorder("assistant"), body), false
+		// Cardless (opencode style): markdown straight on the page,
+		// wrapped to the indent-adjusted width so no line soft-wraps.
+		body := renderMarkdownText(content, vpW-transcriptIndent)
+		return indentedBlock(body), false
 	case "thought":
-		// Collapsed by default: a one-line summary card — "Thinking..."
-		// while the round-trip streams, the measured span once done, a
-		// bare "Thought" when the span is unknown (replayed history).
-		// /toggle_thinking expands every card to the full live content.
-		if !m.visibleConfig.ExpandThinking {
-			switch {
-			case msg.ThoughtEnd.IsZero() && m.loading:
-				return messageCard(vpW, messageRoleBorder("thought"), thoughtSummary("Thinking...")), false
-			case !msg.ThoughtStart.IsZero() && !msg.ThoughtEnd.IsZero():
-				return messageCard(vpW, messageRoleBorder("thought"),
-					thoughtSummary("Thought for "+formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))), false
-			case content != "":
-				return messageCard(vpW, messageRoleBorder("thought"), thoughtSummary("Thought")), false
-			}
-			return "", true
-		}
-		if content != "" {
-			// The spans must carry the card surface explicitly: BaseStyle
-			// would drag the page background (BgNormal) under the text and
-			// paint a black band across the card.
-			body := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.Warning).Italic(true).Render("Thinking: ") +
-				theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextStone).Render(content)
-			return messageCard(vpW, messageRoleBorder("thought"), body), false
-		} else if m.loading {
-			return messageCard(vpW, messageRoleBorder("thought"), thoughtSummary("Thinking...")), false
-		}
-		return "", true
+		return m.thoughtBlock(msg, content)
 	case "tool":
 		// Skill/shell rows are gated by their toggles; the detail toggle
 		// hides input/output (the status line stays).
@@ -2315,31 +2291,59 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		if isShellTool(msg.ToolName) && !m.visibleConfig.ShowToolShell {
 			return "", true
 		}
-		icon := "⏳"
-		switch msg.ToolStatus {
-		case toolDone:
-			icon = "✓"
-		case toolFailed:
-			icon = "✗"
-		}
-		line := icon + " " + msg.ToolName
-		if m.visibleConfig.ShowToolDetail && msg.ToolInput != "" {
-			line += " (" + foldOutput(msg.ToolInput, 1) + ")"
-		}
-		out := ""
-		if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
-			out = "\n" + foldOutput(msg.ToolOutput, defaultToolOutputLines)
-		}
-		// Same surface rule as the thought card: BaseStyle's page background
-		// would paint a black band under the tool line inside the card.
-		body := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextStone).Render(line) +
-			theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh).Render(out)
-		return messageCard(vpW, messageRoleBorder("tool"), body), false
+		return indentedBlock(m.toolBody(msg)), false
 	case "error":
-		return messageCard(vpW, messageRoleBorder("error"), content), false
+		return indentedBlock(theme.BaseStyle().Foreground(theme.Danger).Render(content)), false
 	default:
-		return messageCard(vpW, messageRoleBorder(""), content), false
+		return indentedBlock(theme.BaseStyle().Render(content)), false
 	}
+}
+
+// thoughtBlock renders the thought as opencode does — a warning-colored
+// one-liner, cardless: "Thinking..." while the round-trip streams,
+// "Thought: <duration>" once done, a bare "Thought" when the span is
+// unknown (replayed history). /toggle_thinking expands it to the full
+// content in muted text under the same header.
+func (m *Model) thoughtBlock(msg ChatMessage, content string) (string, bool) {
+	var header string
+	switch {
+	case msg.ThoughtEnd.IsZero() && m.loading:
+		header = theme.BaseStyle().Foreground(theme.Warning).Render("Thinking...")
+	case !msg.ThoughtStart.IsZero() && !msg.ThoughtEnd.IsZero():
+		header = theme.BaseStyle().Foreground(theme.Warning).
+			Render("Thought: " + formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))
+	case content != "":
+		header = theme.BaseStyle().Foreground(theme.Warning).Render("Thought")
+	default:
+		return "", true
+	}
+	if m.visibleConfig.ExpandThinking && content != "" {
+		body := theme.BaseStyle().Foreground(theme.TextMute).Render(content)
+		return indentedBlock(header + "\n" + body), false
+	}
+	return indentedBlock(header), false
+}
+
+// toolBody renders the tool row(s): a status icon + tool name (with the
+// folded input when details are on). Colors track status like opencode —
+// running bright, completed muted, failed red — and the output renders
+// muted below the status line.
+func (m *Model) toolBody(msg ChatMessage) string {
+	icon, fg := "⏳", theme.TextNormal
+	switch msg.ToolStatus {
+	case toolDone:
+		icon, fg = "✓", theme.TextMute
+	case toolFailed:
+		icon, fg = "✗", theme.Danger
+	}
+	line := theme.BaseStyle().Foreground(fg).Render(icon + " " + msg.ToolName)
+	if m.visibleConfig.ShowToolDetail && msg.ToolInput != "" {
+		line += theme.BaseStyle().Foreground(fg).Render(" (" + foldOutput(msg.ToolInput, 1) + ")")
+	}
+	if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
+		line += "\n" + theme.BaseStyle().Foreground(theme.TextMute).Render(foldOutput(msg.ToolOutput, defaultToolOutputLines))
+	}
+	return line
 }
 
 // renderMessagesRange renders messages[start:end) with the standard block
@@ -2427,10 +2431,11 @@ func foldOutput(s string, maxLines int) string {
 // each line starts on the surface, so no markdown cell ever falls through to
 // the page black.
 
-// mdSurfaceSeq is the SGR background parameter sequence for the card surface,
-// e.g. "48;2;45;45;48".
+// mdSurfaceSeq is the SGR background parameter sequence the markdown sits
+// on, e.g. "48;2;28;28;28". Since the transcript went cardless (opencode
+// style), that surface is the page background itself.
 func mdSurfaceSeq() string {
-	rgb := color.RGBAModel.Convert(theme.BgSurface).(color.RGBA)
+	rgb := color.RGBAModel.Convert(theme.BgNormal).(color.RGBA)
 	return fmt.Sprintf("48;2;%d;%d;%d", rgb.R, rgb.G, rgb.B)
 }
 

@@ -1106,7 +1106,7 @@ func TestThoughtSummaryStates(t *testing.T) {
 	m.loading = false
 	done := ChatMessage{Role: "thought", Content: "past", TurnId: 0,
 		ThoughtStart: time.Now().Add(-1500 * time.Millisecond), ThoughtEnd: time.Now()}
-	if got, _ := m.renderMessageBlock(0, done, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thought for 1.5s") || strings.Contains(got, "past") {
+	if got, _ := m.renderMessageBlock(0, done, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thought: 1.5s") || strings.Contains(got, "past") {
 		t.Errorf("finished thought should show its duration:\n%s", utils.StripANSI(got))
 	}
 
@@ -1280,9 +1280,11 @@ func TestMarkdownRendererWidthNotPinned(t *testing.T) {
 }
 
 func TestMessageCardsPerRole(t *testing.T) {
-	// Every role renders as a surfaced card with a distinct left border:
-	// the rail color differs per role and the border cell shares the card
-	// background (no black gutter beside the rail).
+	// opencode style: only the user's prompt is a card (blue rail on the
+	// surface, border cell sharing the fill); agent-side roles are cardless
+	// indented rows identified by text color — thoughts warning orange,
+	// completed tools muted, errors red. Assistant prose carries gruff's
+	// own markdown styling, so only its cardlessness is asserted here.
 	m := newTestModel()
 	m.width = 100
 	m.height = 40
@@ -1294,41 +1296,41 @@ func TestMessageCardsPerRole(t *testing.T) {
 		{Role: "tool", ToolName: "bash", ToolStatus: toolDone, ToolInput: "ls", TurnId: 1},
 		{Role: "error", Content: "boom", TurnId: 1},
 	}
-	expect := map[string]string{
-		"user":      "0;122;255",   // Primary blue
-		"assistant": "154;152;152", // TextAsh
-		"thought":   "255;159;10",  // Warning orange
-		"tool":      "110;110;115", // TextStone
-		"error":     "255;59;48",   // Danger red
-	}
 	vpW := layout.GetViewWidth(100)
-	seen := map[string]bool{}
+	blocks := make([]string, len(m.messages))
 	for i, msg := range m.messages {
 		block, _ := m.renderMessageBlock(i, msg, vpW)
-		if !strings.Contains(block, "┃") {
-			t.Errorf("%s block should have a left border rail", msg.Role)
-		}
-		// Border column background must match the surface card (no black gutter).
-		if !strings.Contains(block, "38;2;"+expect[msg.Role]+";48;2;28;28;28m┃") {
-			t.Errorf("%s rail should render fg=%s on surface bg, got:\n%s", msg.Role, expect[msg.Role], utils.StripANSI(block))
-		}
-		seen[expect[msg.Role]] = true
+		blocks[i] = block
 		for _, line := range strings.Split(utils.StripANSI(block), "\n") {
 			if vc := visibleCells(line); vc > vpW {
-				t.Errorf("%s block row %d cells exceeds viewport %d", msg.Role, vc, vpW)
+				t.Errorf("%s block row %d cells exceeds viewport %d", msg.Role, i, vpW)
 			}
 		}
 	}
-	if len(seen) != len(expect) {
-		t.Errorf("role rail colors must be distinct, got %v", seen)
+	if !strings.Contains(blocks[0], "38;2;0;122;255;48;2;28;28;28m┃") {
+		t.Errorf("user rail should be Primary blue on the surface card:\n%s", utils.StripANSI(blocks[0]))
+	}
+	for _, i := range []int{1, 2, 3, 4} {
+		if strings.Contains(blocks[i], "┃") {
+			t.Errorf("role %s block should be cardless (no rail)", m.messages[i].Role)
+		}
+	}
+	if !strings.Contains(blocks[2], "38;2;255;159;10") {
+		t.Errorf("thought header should be warning orange:\n%s", utils.StripANSI(blocks[2]))
+	}
+	if !strings.Contains(blocks[3], "38;2;100;98;98") {
+		t.Errorf("completed tool row should be muted:\n%s", utils.StripANSI(blocks[3]))
+	}
+	if !strings.Contains(blocks[4], "38;2;255;59;48") {
+		t.Errorf("error row should be red:\n%s", utils.StripANSI(blocks[4]))
 	}
 }
 
-// TestThoughtAndToolTextSitOnSurface verifies the styled body spans render
-// on the card surface, not on the page background: BaseStyle drags
-// BgNormal into the card, which painted a black band behind the thinking
-// text and tool lines (the surface only showed around the band).
-func TestThoughtAndToolTextSitOnSurface(t *testing.T) {
+// TestThoughtAndToolTextOnPage verifies the cardless agent-side rows paint
+// the page background: since the opencode-style rework they sit on the page
+// (BgNormal), so their colored text must pair with the page fill, not the
+// old card surface.
+func TestThoughtAndToolTextOnPage(t *testing.T) {
 	m := newTestModel()
 	m.width = 100
 	m.height = 40
@@ -1336,21 +1338,21 @@ func TestThoughtAndToolTextSitOnSurface(t *testing.T) {
 	vpW := layout.GetViewWidth(100)
 
 	thought := ChatMessage{Role: "thought", Content: "checking the request", TurnId: 1}
-	m.visibleConfig.ExpandThinking = true // expanded: label + body both render
+	m.visibleConfig.ExpandThinking = true // expanded: header + body both render
 	block, _ := m.renderMessageBlock(0, thought, vpW)
-	// The label (Warning orange) and the body (TextStone) must both pair
-	// their foreground with the surface background.
-	if !strings.Contains(block, "38;2;255;159;10;48;2;28;28;28") {
-		t.Errorf("thinking label should render on the surface bg:\n%s", utils.StripANSI(block))
+	// The header (Warning orange) and the body (muted) must both pair
+	// their foreground with the page background.
+	if !strings.Contains(block, "38;2;255;159;10;48;2;0;0;0") {
+		t.Errorf("thinking header should render on the page bg:\n%s", utils.StripANSI(block))
 	}
-	if !strings.Contains(block, "38;2;110;110;115;48;2;28;28;28") {
-		t.Errorf("thinking text should render on the surface bg:\n%s", utils.StripANSI(block))
+	if !strings.Contains(block, "38;2;100;98;98;48;2;0;0;0") {
+		t.Errorf("thinking body should render muted on the page bg:\n%s", utils.StripANSI(block))
 	}
 
 	tool := ChatMessage{Role: "tool", ToolName: "bash", ToolStatus: toolDone, ToolInput: "ls", TurnId: 1}
 	block, _ = m.renderMessageBlock(1, tool, vpW)
-	if !strings.Contains(block, "38;2;110;110;115;48;2;28;28;28") {
-		t.Errorf("tool line should render on the surface bg:\n%s", utils.StripANSI(block))
+	if !strings.Contains(block, "38;2;100;98;98;48;2;0;0;0") {
+		t.Errorf("tool line should render muted on the page bg:\n%s", utils.StripANSI(block))
 	}
 }
 
@@ -1448,19 +1450,20 @@ func markdownCellOK(t *testing.T, out string) {
 }
 
 func TestMarkdownBackgroundsClean(t *testing.T) {
-	// Markdown must render entirely on the card surface: gruff spans only
-	// set the foreground, so the surface background is injected into every
-	// span to keep resets from dropping cells to black. Code elements keep
-	// gruff's foreground-only style (no ANSI-256 or tinted background).
+	// Markdown renders cardless on the page background (opencode style):
+	// gruff spans only set the foreground, so the page background is
+	// injected into every span to keep resets from dropping cells. Code
+	// elements keep gruff's foreground-only style (no ANSI-256 or tinted
+	// background), and no surface fill remains.
 	out := renderMarkdownText("## 标题\n\n正文带 `行内代码` 和 **粗体**。\n\n```go\nfunc main() {}\n```", 90)
 	if strings.Contains(out, "48;5;") {
 		t.Errorf("markdown must not use ANSI-256 backgrounds, got 48;5;:\n%s", out)
 	}
-	if strings.Contains(out, "48;2;0;0;0") {
-		t.Errorf("markdown must not fall through to black cells:\n%s", out)
+	if strings.Contains(out, "48;2;28;28;28") {
+		t.Errorf("markdown must not sit on the old card surface:\n%s", out)
 	}
-	if !strings.Contains(out, "48;2;28;28;28") {
-		t.Errorf("markdown spans should sit on the card surface (28;28;28):\n%s", out)
+	if !strings.Contains(out, "48;2;0;0;0") {
+		t.Errorf("markdown spans should sit on the page background (0;0;0):\n%s", out)
 	}
 	markdownCellOK(t, out)
 }
@@ -1468,7 +1471,7 @@ func TestMarkdownBackgroundsClean(t *testing.T) {
 func TestMarkdownBackgroundsSurviveView(t *testing.T) {
 	// The full view pipeline (card render, viewport fitting, page background
 	// pass) must preserve the background discipline: no ANSI-256 backgrounds
-	// appear anywhere, and every markdown cell sits on the card surface
+	// appear anywhere, and every markdown cell sits on the page background
 	// (gruff paints foregrounds only).
 	m := newTestModel()
 	m.inChat = true
@@ -2178,10 +2181,10 @@ func TestAssistantCardNoLeadingBlank(t *testing.T) {
 	m.height = 30
 	m.messages = []ChatMessage{{Role: "assistant", Content: "# Hi\n\nbody text"}}
 	lines := strings.Split(m.renderMessages(), "\n")
-	// Card layout: line 0 is the (intentional) top pad row, so the first
-	// content row is line 1 — it must carry text. A blank there means
-	// glamour's own leading blank leaked through.
-	if len(lines) < 2 || strings.TrimSpace(utils.StripANSI(lines[1])) == "" {
+	// Cardless assistant: line 0 is the first markdown row (3-column indent
+	// then text) — it must carry text. A blank there means glamour's own
+	// leading blank leaked through.
+	if len(lines) < 1 || strings.TrimSpace(utils.StripANSI(lines[0])) == "" {
 		t.Errorf("assistant card content row is blank — leading markdown padding leaked:\n%s",
 			utils.StripANSI(strings.Join(lines, "\n")))
 	}
@@ -2233,12 +2236,11 @@ func missingBG(line string) []int {
 	return holes
 }
 
-// TestMarkdownTableCellsCarrySurfaceBG guards markdownSurfaceBG: alignment
+// TestMarkdownTableCellsCarryPageBG guards markdownSurfaceBG: alignment
 // spaces emitted after a bare reset (e.g. inside tables) must still sit on
-// the card surface. Every non-margin line of the transcript has to paint an
-// explicit background; only the all-blank margin rows may fall through to
-// the page black.
-func TestMarkdownTableCellsCarrySurfaceBG(t *testing.T) {
+// the page background. Every non-margin line of the transcript has to paint
+// an explicit background; only the all-blank margin rows may fall through.
+func TestMarkdownTableCellsCarryPageBG(t *testing.T) {
 	m := newTestModel()
 	m.width = 100
 	m.height = 30
