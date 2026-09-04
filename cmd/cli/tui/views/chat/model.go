@@ -2176,12 +2176,13 @@ func messageRoleBorder(role string) color.Color {
 // with a role-colored left border. The border column shares the card
 // background so the rail reads as part of the block instead of a black
 // gutter. Inner padding is symmetric (top and bottom 1) so the text floats
-// evenly inside the card; vertical rhythm between cards comes from the
-// 1-row margins around the card. vpW is the total card width; a Width(vpW)
-// style renders to the viewport width including border and padding.
+// evenly inside the card; vertical rhythm comes from a single 1-row margin
+// below each card (no top margin), so adjacent cards sit exactly one blank
+// row apart. vpW is the total card width; a Width(vpW) style renders to the
+// viewport width including border and padding.
 func messageCard(vpW int, border color.Color, body string) string {
 	return theme.BaseStyle().
-		Margin(1, 0).MarginBackground(theme.BgNormal).
+		MarginBottom(1).MarginBackground(theme.BgNormal).
 		Padding(1, 1, 1, 1).
 		Width(vpW).
 		Background(theme.BgSurface).
@@ -2293,8 +2294,8 @@ func (m *Model) renderMessagesRange(start, end int) string {
 			// messageCard's block does not end with a newline, so joining
 			// blocks back-to-back would collapse the boundary line: the
 			// previous card's bottom margin row merges with the next card's
-			// top margin row on one wrapped line (background leaks, card
-			// spacing doubles). Keep exactly one newline between blocks.
+			// top pad row on one wrapped line (background leaks). Keep
+			// exactly one newline between blocks.
 			if wrote {
 				doc.WriteByte('\n')
 			}

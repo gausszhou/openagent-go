@@ -1236,16 +1236,21 @@ func TestMessageCardPaddingSymmetric(t *testing.T) {
 	vpW := layout.GetViewWidth(100)
 	block, _ := m.renderMessageBlock(0, ChatMessage{Role: "user", Content: "hi", TurnId: 1}, vpW)
 	rows := strings.Split(utils.StripANSI(block), "\n")
-	// The block is margin + pad + text + pad + margin for a one-line body.
-	if len(rows) != 5 {
-		t.Fatalf("card should be margin + pad + text + pad + margin, got %d rows:\n%q", len(rows), rows)
+	// The block is pad + text + pad + margin for a one-line body: no top
+	// margin, so the gap between adjacent cards is the single bottom-margin
+	// row.
+	if len(rows) != 4 {
+		t.Fatalf("card should be pad + text + pad + margin, got %d rows:\n%q", len(rows), rows)
 	}
 	railOnly := func(row string) bool { return strings.Trim(row, " ") == "┃" }
-	if !railOnly(rows[1]) || !railOnly(rows[3]) {
-		t.Errorf("expected rail-only pad rows framing the text, got %q / %q", rows[1], rows[3])
+	if !railOnly(rows[0]) || !railOnly(rows[2]) {
+		t.Errorf("expected rail-only pad rows framing the text, got %q / %q", rows[0], rows[2])
 	}
-	if !strings.Contains(rows[2], "hi") {
-		t.Errorf("middle row should carry the text, got %q", rows[2])
+	if !strings.Contains(rows[1], "hi") {
+		t.Errorf("middle row should carry the text, got %q", rows[1])
+	}
+	if strings.TrimSpace(rows[3]) != "" {
+		t.Errorf("last row should be the blank bottom margin, got %q", rows[3])
 	}
 }
 
@@ -2010,10 +2015,10 @@ func TestToolOutputDefaultFoldsAtFiveLines(t *testing.T) {
 
 // TestMessageBlocksSeparatedByNewline guards the block join: messageCard's
 // Render output does not end with a newline, so blocks were joined without
-// one — the first card's bottom margin merged with the next card's top
-// margin into one line twice the viewport width (background leaks, spacing
-// doubled). Each 5-line card (margin, top pad, body, bottom pad, margin)
-// must keep exactly one newline between blocks.
+// one — the first card's bottom margin merged with the next card's top pad
+// into one line twice the viewport width (background leaks). Each 4-line
+// card (top pad, body, bottom pad, bottom margin) must keep exactly one
+// newline between blocks.
 func TestMessageBlocksSeparatedByNewline(t *testing.T) {
 	m := newTestModel()
 	m.width = 100
@@ -2024,8 +2029,8 @@ func TestMessageBlocksSeparatedByNewline(t *testing.T) {
 	}
 	out := m.renderMessages()
 	lines := strings.Split(out, "\n")
-	if len(lines) != 10 {
-		t.Fatalf("two 5-line cards should render 10 lines, got %d:\n%s", len(lines), utils.StripANSI(out))
+	if len(lines) != 8 {
+		t.Fatalf("two 4-line cards should render 8 lines, got %d:\n%s", len(lines), utils.StripANSI(out))
 	}
 	for i, ln := range lines {
 		if w := lipgloss.Width(ln); w > 97 {
@@ -2043,10 +2048,10 @@ func TestAssistantCardNoLeadingBlank(t *testing.T) {
 	m.height = 30
 	m.messages = []ChatMessage{{Role: "assistant", Content: "# Hi\n\nbody text"}}
 	lines := strings.Split(m.renderMessages(), "\n")
-	// Card layout: line 0 is the margin, line 1 the (intentional) top pad
-	// row, so the first content row is line 2 — it must carry text. A blank
-	// there means glamour's own leading blank leaked through.
-	if len(lines) < 3 || strings.TrimSpace(utils.StripANSI(lines[2])) == "" {
+	// Card layout: line 0 is the (intentional) top pad row, so the first
+	// content row is line 1 — it must carry text. A blank there means
+	// glamour's own leading blank leaked through.
+	if len(lines) < 2 || strings.TrimSpace(utils.StripANSI(lines[1])) == "" {
 		t.Errorf("assistant card content row is blank — leading markdown padding leaked:\n%s",
 			utils.StripANSI(strings.Join(lines, "\n")))
 	}
@@ -2541,8 +2546,8 @@ func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
 			t.Errorf("message %d height = %d, want rendered %d", i, heights[i], want)
 		}
 	}
-	if heights[0] != 5 {
-		t.Errorf("short user msg height = %d, want 5 (margin, pad, text, pad, margin)", heights[0])
+	if heights[0] != 4 {
+		t.Errorf("short user msg height = %d, want 4 (pad, text, pad, margin)", heights[0])
 	}
 }
 
@@ -2569,16 +2574,17 @@ func TestVirtualDocStylesOnlyVisibleWindow(t *testing.T) {
 	if len(lines) != total {
 		t.Fatalf("doc rows = %d, want %d (sum of exact heights)", len(lines), total)
 	}
-	// Message 0's height is 5 ([margin, pad, text, pad, margin]), but the
-	// window is 4 rows: rows [0,4) are its real block rows (the margin row
-	// has no rail) and everything below is placeholder filler.
-	if strings.TrimSpace(utils.StripANSI(lines[0])) != "" {
-		t.Errorf("row 0 should be the card's top margin:\n%q", lines[0])
-	}
-	for i := 1; i < 4; i++ {
+	// Message 0's height is 4 ([pad, text, pad, margin]) and the window is
+	// 4 rows: the whole block renders inside the window — rows 0-2 carry
+	// the rail (row 0 is the top pad), row 3 is the blank bottom margin —
+	// and everything below is placeholder filler.
+	for i := 0; i < 3; i++ {
 		if !strings.Contains(lines[i], "┃") {
 			t.Errorf("in-window row %d should be a real card row:\n%q", i, lines[i])
 		}
+	}
+	if strings.TrimSpace(utils.StripANSI(lines[3])) != "" {
+		t.Errorf("row 3 should be the blank bottom margin:\n%q", lines[3])
 	}
 	for i := 4; i < len(lines); i++ {
 		if !strings.Contains(lines[i], "┆") {
@@ -2617,7 +2623,8 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 		t.Error("exited message must reuse its cached block, not restyle")
 	}
 	// The refeed at offset 6 must show real rows for the newly revealed
-	// message 2 (its row range covers offset 6) rather than placeholders.
+	// message 1 (4-row blocks put rows [4,8) inside it) rather than
+	// placeholders.
 	doc := m.renderVirtualDoc(4)
 	lines := strings.Split(doc, "\n")
 	if len(lines) < 7 || !strings.Contains(lines[6], "┃") {
