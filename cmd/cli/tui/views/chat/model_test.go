@@ -2589,6 +2589,37 @@ func TestWelcomeInputCenteredLive(t *testing.T) {
 	}
 }
 
+// TestWelcomeDropsBelowCenter verifies the welcome block hangs below exact
+// vertical center: the input box top (geom.inputTopY, the row the slash
+// sheet docks to) must sit welcomeDrop rows lower than strict centering,
+// and the block must still fit the height-2 working area on short
+// terminals (the drop is capped by the available slack there).
+func TestWelcomeDropsBelowCenter(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+
+	var geom viewGeom
+	m.renderWelcome(&geom)
+
+	contentH := lipgloss.Height(m.welcomeInner())
+	logoH := lipgloss.Height(m.welcomeLogo(m.getContentWidth()))
+	centered := (36-2-contentH)/2 + logoH
+	if geom.inputTopY != centered+welcomeDrop {
+		t.Errorf("welcome input top = %d, want centered %d + drop %d = %d",
+			geom.inputTopY, centered, welcomeDrop, centered+welcomeDrop)
+	}
+
+	m2 := newTestModel()
+	m2.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	var geom2 viewGeom
+	m2.renderWelcome(&geom2)
+	blockTop := geom2.inputTopY - lipgloss.Height(m2.welcomeLogo(m2.getContentWidth()))
+	if blockTop+lipgloss.Height(m2.welcomeInner()) > 20-2 {
+		t.Errorf("welcome block overflows the working area: top=%d height=%d",
+			blockTop, lipgloss.Height(m2.welcomeInner()))
+	}
+}
+
 // TestInputBoxStaysUniformWithLongContent guards the inner-width clamp:
 // the shared textarea is sized for the chat column, so on the welcome page
 // a long draft must wrap at the box's inner width instead of spilling past

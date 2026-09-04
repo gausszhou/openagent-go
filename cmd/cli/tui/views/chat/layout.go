@@ -39,15 +39,6 @@ func (m *Model) viewportHeight() int {
 	return vpH
 }
 
-// welcomeInputTopY is the screen row where the welcome input box starts. It
-// mirrors renderWelcome's vertical centering so the sheet can dock exactly
-// where the box will be drawn. Pure.
-func (m *Model) welcomeInputTopY() int {
-	content := m.welcomeInner()
-	logo := m.welcomeLogo(m.getContentWidth())
-	return (m.height-2-lipgloss.Height(content))/2 + lipgloss.Height(logo)
-}
-
 // syncViewport refeeds the transcript viewport when its content, size or
 // scroll offset changed, and remembers the permission-dialog option rows. It
 // is called at the end of every Update (bubbletea runs cmd goroutines and

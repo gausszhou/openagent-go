@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"strings"
+
 	"charm.land/lipgloss/v2"
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/components"
@@ -16,19 +18,39 @@ func welcomeInputWidth(colWidth int) int {
 	return min(w*3/2, colWidth)
 }
 
+// welcomeDrop is how many rows the welcome block hangs below exact vertical
+// center: strict centering parks the input box a touch too high, so the page
+// lets it settle a little lower instead.
+const welcomeDrop = 2
+
+// welcomeTopPad is the row the welcome block starts on: half the working
+// area's slack (vertical centering) plus welcomeDrop, capped to the slack so
+// the block never overflows the height-2 area on short terminals.
+func (m *Model) welcomeTopPad(contentH int) int {
+	room := max(0, m.height-2-contentH)
+	return min(room, room/2+welcomeDrop)
+}
+
 // renderWelcome renders the pre-chat page: logo, input, status bar, footer.
 // It writes no model state — the geometry a caller needs (input box position,
 // used to dock the slash-command sheet) is written into geom.
 func (m *Model) renderWelcome(geom *viewGeom) string {
 	w := m.getContentWidth()
 	content := m.welcomeInner()
+	ch := lipgloss.Height(content)
 	// Record where the input box starts so the slash-command card (floated
 	// above it) does not land on the screen center.
-	geom.inputTopY = (m.height-2-lipgloss.Height(content))/2 + lipgloss.Height(m.welcomeLogo(w))
+	geom.inputTopY = m.welcomeTopPad(ch) + lipgloss.Height(m.welcomeLogo(w))
 
 	// Height-2: leaves the last two rows for the footer and one blank row
 	// below it, so WorkDir/Version float one row above the bottom edge.
-	full := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Center, content, lipgloss.WithWhitespaceStyle(theme.BaseStyle()))
+	// Top placement with our own top pad (welcomeTopPad) instead of
+	// PlaceVertical's Center: the block hangs welcomeDrop rows below strict
+	// center.
+	if pad := m.welcomeTopPad(ch); pad > 0 {
+		content = strings.Repeat("\n", pad) + content
+	}
+	full := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Top, content, lipgloss.WithWhitespaceStyle(theme.BaseStyle()))
 
 	workDirValue := theme.BaseStyle().PaddingLeft(1).Foreground(theme.TextAsh).Render(m.workDir)
 	versionValue := theme.BaseStyle().Width(m.width - lipgloss.Width(workDirValue)).PaddingRight(1).Align(lipgloss.Right).Foreground(theme.TextAsh).Render(m.version)
@@ -43,9 +65,9 @@ func (m *Model) renderWelcome(geom *viewGeom) string {
 }
 
 // welcomeInner builds the centered block of the welcome page (logo, input,
-// status, tips). Both renderWelcome and the geometry helper welcomeInputTopY
-// use it, so the measured content height that positions the input box can
-// never drift from what is actually rendered.
+// status, tips). renderWelcome measures its height to position the block and
+// the input box (welcomeTopPad + geom), so the measured geometry can never
+// drift from what is actually rendered.
 func (m *Model) welcomeInner() string {
 	w := m.getContentWidth()
 	logo := m.welcomeLogo(w)
