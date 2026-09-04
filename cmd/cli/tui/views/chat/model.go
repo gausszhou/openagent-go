@@ -319,7 +319,7 @@ func allPanelCommands() []panelCommand {
 		{"/models", "Switch model", actionModels, true, false},
 		{"/toggle_mode", "Switch mode", actionToggleMode, true, false},
 		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false},
-		{"/toggle_thinking", "Toggle thinking content", actionToggleThinking, true, true},
+		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true},
 		{"/toggle_skill", "Toggle skill tools", actionToggleSkill, true, true},
 		{"/toggle_shell", "Toggle shell tools", actionToggleShell, true, true},
 		{"/toggle_toolcall", "Toggle tool call detail", actionToggleToolDetail, true, true},
@@ -339,7 +339,7 @@ func (m *Model) toggleIcon(slash string) string {
 	on := false
 	switch slash {
 	case "/toggle_thinking":
-		on = m.visibleConfig.ShowThinking
+		on = m.visibleConfig.ExpandThinking
 	case "/toggle_skill":
 		on = m.visibleConfig.ShowToolSkill
 	case "/toggle_shell":
@@ -362,6 +362,13 @@ type ChatMessage struct {
 	Role    string
 	Content string
 	TurnId  int64
+
+	// thought timing (Role == "thought"): ThoughtStart is stamped when the
+	// first chunk arrives, ThoughtEnd when thinking gives way to another
+	// message or the turn finishes. Zero values mean the span is unknown —
+	// history replayed from a session carries no measurable times.
+	ThoughtStart time.Time
+	ThoughtEnd   time.Time
 
 	// tool-call messages (Role == "tool")
 	ToolCallID string
@@ -486,11 +493,11 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 		tips:       components.NextHelpTip(),
 		suggestion: suggestion,
 
-		// Transcript visibility defaults to "everything on": thoughts,
-		// skill/shell rows and tool details are all shown until the user
-		// toggles them off via /toggle_* (the palette icons start ●).
+		// Transcript visibility defaults: thought cards are collapsed to a
+		// one-line summary (Thinking... / Thought for Ns) until
+		// /toggle_thinking expands them; skill/shell rows and tool details
+		// are shown until toggled off (the palette icons start ●).
 		visibleConfig: components.VisibleConfig{
-			ShowThinking:   true,
 			ShowToolSkill:  true,
 			ShowToolShell:  true,
 			ShowToolDetail: true,
@@ -756,12 +763,13 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Keep the input text so nothing is lost.
 						return m, nil
 					}
-					m.inputQueue = append(m.inputQueue, text)
-					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
-					m.chatTextarea.SetValue("")
-					m.viewportDirty = true
-					m.statusText = fmt.Sprintf("[Queued:%d] waiting for the agent...", len(m.inputQueue))
-					return m, nil
+				m.inputQueue = append(m.inputQueue, text)
+				m.closeTrailingThought()
+				m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
+				m.chatTextarea.SetValue("")
+				m.viewportDirty = true
+				m.statusText = fmt.Sprintf("[Queued:%d] waiting for the agent...", len(m.inputQueue))
+				return m, nil
 				}
 				// User message → transcript, then async Prompt to ACP.
 				m.messages = append(m.messages, ChatMessage{
@@ -900,6 +908,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case agentMessageMsg:
+		m.closeTrailingThought()
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "assistant" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
 		} else {
@@ -911,7 +920,13 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "thought" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
 		} else {
-			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: msg.text, TurnId: m.turnId})
+			start := time.Now()
+			if m.replaying {
+				// Replayed history has no meaningful span: leave the
+				// timestamps zero so the collapsed card stays undated.
+				start = time.Time{}
+			}
+			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: msg.text, TurnId: m.turnId, ThoughtStart: start})
 		}
 		m.trimMessageStore()
 		return m.markContentDirty()
@@ -928,6 +943,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case promptDoneMsg:
+		m.closeTrailingThought()
 		m.loading = false
 		m.statusText = ""
 		// Drain the input queue: send the oldest waiting message next.
@@ -1103,6 +1119,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.markContentDirty()
 		}
+		m.closeTrailingThought()
 		m.messages = append(m.messages, ChatMessage{
 			Role:       "tool",
 			TurnId:     m.turnId,
@@ -1115,6 +1132,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case acpErrorMsg:
+		m.closeTrailingThought()
 		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error()})
 		m.loading = false
 		m.viewportDirty = true
@@ -1453,7 +1471,7 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		}
 		return m.openModelsPanel()
 	case actionToggleThinking:
-		m.visibleConfig.ShowThinking = !m.visibleConfig.ShowThinking
+		m.visibleConfig.ExpandThinking = !m.visibleConfig.ExpandThinking
 		m.viewportDirty = true
 		return m, nil
 	case actionToggleSkill:
@@ -2102,21 +2120,26 @@ func (m *Model) renderMessages() string {
 type renderCacheEntry struct {
 	vpW                                                  int
 	loading                                              bool
-	showThink, showSkill, showShell, showDetail          bool
+	expandThink, showSkill, showShell, showDetail        bool
+	thoughtStart, thoughtEnd                             time.Time
 	role, content, toolName, toolStatus, toolIn, toolOut string
 	block                                                string
 	skip                                                 bool
 }
 
 // renderCacheHits reports whether a cached entry was styled under exactly
-// the current message and viewport settings.
+// the current message and viewport settings. The thought timestamps are part
+// of the fingerprint: closing a trailing thought (end stamp) must restyle
+// its collapsed summary even though the content is unchanged.
 func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading bool, vc components.VisibleConfig) bool {
 	return e.vpW == vpW &&
 		e.loading == loading &&
-		e.showThink == vc.ShowThinking &&
+		e.expandThink == vc.ExpandThinking &&
 		e.showSkill == vc.ShowToolSkill &&
 		e.showShell == vc.ShowToolShell &&
 		e.showDetail == vc.ShowToolDetail &&
+		e.thoughtStart.Equal(msg.ThoughtStart) &&
+		e.thoughtEnd.Equal(msg.ThoughtEnd) &&
 		e.role == msg.Role &&
 		e.content == msg.Content &&
 		e.toolName == msg.ToolName &&
@@ -2138,11 +2161,13 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 	}
 	e := renderCacheEntry{
 		vpW: vpW, loading: m.loading,
-		showThink:  m.visibleConfig.ShowThinking,
-		showSkill:  m.visibleConfig.ShowToolSkill,
-		showShell:  m.visibleConfig.ShowToolShell,
-		showDetail: m.visibleConfig.ShowToolDetail,
-		role:       msg.Role, content: msg.Content,
+		expandThink: m.visibleConfig.ExpandThinking,
+		showSkill:   m.visibleConfig.ShowToolSkill,
+		showShell:   m.visibleConfig.ShowToolShell,
+		showDetail:  m.visibleConfig.ShowToolDetail,
+		thoughtStart: msg.ThoughtStart,
+		thoughtEnd:   msg.ThoughtEnd,
+		role:         msg.Role, content: msg.Content,
 		toolName: msg.ToolName, toolStatus: msg.ToolStatus,
 		toolIn: msg.ToolInput, toolOut: msg.ToolOutput,
 	}
@@ -2192,6 +2217,42 @@ func messageCard(vpW int, border color.Color, body string) string {
 		Render(body)
 }
 
+// thoughtSummary renders the collapsed one-liner. The span carries the card
+// surface explicitly — same rule as the expanded card: BaseStyle would drag
+// the page background under the text and paint a black band on the card.
+func thoughtSummary(s string) string {
+	return theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.Warning).Italic(true).Render(s)
+}
+
+// formatThoughtDuration renders a thinking span as a compact duration:
+// "3.2s" below ten seconds, whole seconds below a minute, then "1m05s".
+func formatThoughtDuration(d time.Duration) string {
+	s := d.Seconds()
+	switch {
+	case s < 10:
+		return fmt.Sprintf("%.1fs", s)
+	case s < 60:
+		return fmt.Sprintf("%.0fs", s)
+	default:
+		return fmt.Sprintf("%dm%02ds", int(s)/60, int(s)%60)
+	}
+}
+
+// closeTrailingThought stamps the end time on a still-open trailing thought
+// message: thinking is over once any other message follows or the turn
+// finishes. Replayed thoughts (zero start) stay untouched — their duration
+// is unknowable.
+func (m *Model) closeTrailingThought() {
+	n := len(m.messages)
+	if n == 0 || m.messages[n-1].Role != "thought" {
+		return
+	}
+	if m.messages[n-1].ThoughtStart.IsZero() || !m.messages[n-1].ThoughtEnd.IsZero() {
+		return
+	}
+	m.messages[n-1].ThoughtEnd = time.Now()
+}
+
 // styleMessageBlock renders one message as its transcript block. skip means
 // the message is hidden by the current visibility toggles.
 func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
@@ -2206,7 +2267,20 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		body := renderMarkdownText(content, vpW-3)
 		return messageCard(vpW, messageRoleBorder("assistant"), body), false
 	case "thought":
-		if !m.visibleConfig.ShowThinking {
+		// Collapsed by default: a one-line summary card — "Thinking..."
+		// while the round-trip streams, the measured span once done, a
+		// bare "Thought" when the span is unknown (replayed history).
+		// /toggle_thinking expands every card to the full live content.
+		if !m.visibleConfig.ExpandThinking {
+			switch {
+			case msg.ThoughtEnd.IsZero() && m.loading:
+				return messageCard(vpW, messageRoleBorder("thought"), thoughtSummary("Thinking...")), false
+			case !msg.ThoughtStart.IsZero() && !msg.ThoughtEnd.IsZero():
+				return messageCard(vpW, messageRoleBorder("thought"),
+					thoughtSummary("Thought for "+formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))), false
+			case content != "":
+				return messageCard(vpW, messageRoleBorder("thought"), thoughtSummary("Thought")), false
+			}
 			return "", true
 		}
 		if content != "" {
@@ -2217,8 +2291,7 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 				theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextStone).Render(content)
 			return messageCard(vpW, messageRoleBorder("thought"), body), false
 		} else if m.loading {
-			body := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.Warning).Italic(true).Render("Thinking...")
-			return messageCard(vpW, messageRoleBorder("thought"), body), false
+			return messageCard(vpW, messageRoleBorder("thought"), thoughtSummary("Thinking...")), false
 		}
 		return "", true
 	case "tool":

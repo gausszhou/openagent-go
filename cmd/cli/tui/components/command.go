@@ -15,7 +15,10 @@ type Command struct {
 // VisibleConfig holds the transcript visibility toggles. Only the fields the
 // view layer reads are kept; the toggle interactions are out of scope.
 type VisibleConfig struct {
-	ShowThinking   bool
+	// ExpandThinking false (default) collapses thought cards to a one-line
+	// summary ("Thinking..." / "Thought for 3s"); true renders the full
+	// live content (/toggle_thinking).
+	ExpandThinking bool
 	ShowToolSkill  bool
 	ShowToolShell  bool
 	ShowToolDetail bool

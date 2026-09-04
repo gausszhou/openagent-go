@@ -198,8 +198,8 @@ func TestToggleThinkingFlipsConfig(t *testing.T) {
 	m := newTestModel()
 	m.chatTextarea.SetValue("/toggle_thinking")
 	m2, _ := enterKey(m)
-	if m2.visibleConfig.ShowThinking {
-		t.Error("/toggle_thinking should flip ShowThinking off (default on)")
+	if !m2.visibleConfig.ExpandThinking {
+		t.Error("/toggle_thinking should expand thinking (default collapsed)")
 	}
 }
 
@@ -227,8 +227,8 @@ func TestPanelExecuteTogglesAndCloses(t *testing.T) {
 	if m2.panelOpen {
 		t.Error("panel should close after executing a command")
 	}
-	if m2.visibleConfig.ShowThinking {
-		t.Error("panel selection should flip ShowThinking off (default on)")
+	if !m2.visibleConfig.ExpandThinking {
+		t.Error("panel selection should expand thinking (default collapsed)")
 	}
 }
 
@@ -244,12 +244,12 @@ func TestPanelEscCloses(t *testing.T) {
 
 func TestToggleIconTracksConfig(t *testing.T) {
 	m := newTestModel()
-	if m.toggleIcon("/toggle_thinking") != "●" {
-		t.Error("toggle icon should start on (default)")
+	if m.toggleIcon("/toggle_thinking") != "○" {
+		t.Error("thinking toggle should start off (collapsed by default)")
 	}
 	m.chatTextarea.SetValue("/toggle_thinking")
 	m2, _ := enterKey(m)
-	if m2.toggleIcon("/toggle_thinking") != "○" {
+	if m2.toggleIcon("/toggle_thinking") != "●" {
 		t.Error("toggle icon should reflect config after toggle")
 	}
 }
@@ -995,18 +995,21 @@ func TestToolNameClassifiers(t *testing.T) {
 	}
 }
 
-func TestThoughtGatedByShowThinking(t *testing.T) {
+func TestThoughtCollapsedByDefault(t *testing.T) {
 	m := newTestModel()
 	m.messages = append(m.messages, ChatMessage{Role: "thought", Content: "secret reasoning", TurnId: 0})
 	rendered := m.renderMessages()
-	if !strings.Contains(rendered, "secret reasoning") {
-		t.Error("thought should render by default")
+	if strings.Contains(rendered, "secret reasoning") {
+		t.Error("collapsed thought must not show its content by default")
 	}
-	m.visibleConfig.ShowThinking = false
-	if got := m.renderMessages(); strings.Contains(got, "secret reasoning") {
-		t.Error("thought must be hidden when ShowThinking is off")
+	if !strings.Contains(rendered, "Thought") {
+		t.Error("collapsed thought should show a summary line")
 	}
-	m.visibleConfig.ShowThinking = true
+	m.visibleConfig.ExpandThinking = true
+	if got := m.renderMessages(); !strings.Contains(got, "secret reasoning") {
+		t.Error("expanded thought should render its content")
+	}
+	m.visibleConfig.ExpandThinking = false
 	m.visibleConfig.ShowToolDetail = false
 	m.messages = append(m.messages, ChatMessage{Role: "tool", TurnId: 0, ToolCallID: "a", ToolName: "read_file", ToolStatus: toolDone, ToolOutput: "data"})
 	rendered = m.renderMessages()
@@ -1015,6 +1018,62 @@ func TestThoughtGatedByShowThinking(t *testing.T) {
 	}
 	if strings.Contains(rendered, "data") {
 		t.Error("tool output must be hidden when ShowToolDetail is off")
+	}
+}
+
+// TestThoughtSummaryStates covers the collapsed card's three one-liners:
+// streaming shows "Thinking...", a measured span shows the duration, and a
+// replayed span of unknown length shows a bare "Thought". None of them may
+// leak the thought text.
+func TestThoughtSummaryStates(t *testing.T) {
+	m := newTestModel()
+	streaming := ChatMessage{Role: "thought", Content: "mid-flight", TurnId: 0, ThoughtStart: time.Now()}
+	m.loading = true
+	if got, _ := m.renderMessageBlock(0, streaming, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thinking...") || strings.Contains(got, "mid-flight") {
+		t.Errorf("streaming thought should summarize to Thinking...:\n%s", utils.StripANSI(got))
+	}
+
+	m.loading = false
+	done := ChatMessage{Role: "thought", Content: "past", TurnId: 0,
+		ThoughtStart: time.Now().Add(-1500 * time.Millisecond), ThoughtEnd: time.Now()}
+	if got, _ := m.renderMessageBlock(0, done, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thought for 1.5s") || strings.Contains(got, "past") {
+		t.Errorf("finished thought should show its duration:\n%s", utils.StripANSI(got))
+	}
+
+	replayed := ChatMessage{Role: "thought", Content: "from history", TurnId: 0}
+	if got, _ := m.renderMessageBlock(0, replayed, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thought") || strings.Contains(got, "from history") {
+		t.Errorf("replayed thought should show a bare summary:\n%s", utils.StripANSI(got))
+	}
+}
+
+// TestCloseTrailingThought guards the duration measurement: a trailing
+// open thought gets its end stamped when the next message arrives or the
+// turn finishes; a replayed thought (zero start) stays undated.
+func TestCloseTrailingThought(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{{Role: "thought", Content: "hmm", TurnId: 0, ThoughtStart: time.Now().Add(-time.Second)}}
+
+	m.Update(agentMessageMsg{text: "answer"})
+	if m.messages[0].ThoughtEnd.IsZero() {
+		t.Error("assistant arrival should stamp the thought's end")
+	}
+	if m.messages[0].ThoughtEnd.Sub(m.messages[0].ThoughtStart) <= 0 {
+		t.Error("stamped end must come after the start")
+	}
+
+	// promptDoneMsg stamps a still-trailing open thought (turn ended
+	// without an assistant message).
+	m.messages = []ChatMessage{{Role: "thought", Content: "hmm", TurnId: 0, ThoughtStart: time.Now()}}
+	m.Update(promptDoneMsg{})
+	if m.messages[0].ThoughtEnd.IsZero() {
+		t.Error("turn completion should stamp the thought's end")
+	}
+
+	// Replayed thought: no start, so no end may be invented.
+	m.messages = []ChatMessage{{Role: "thought", Content: "hmm", TurnId: 0}}
+	m.Update(promptDoneMsg{})
+	if !m.messages[0].ThoughtEnd.IsZero() {
+		t.Error("replayed thought must stay undated")
 	}
 }
 
@@ -1207,6 +1266,7 @@ func TestThoughtAndToolTextSitOnSurface(t *testing.T) {
 	vpW := layout.GetViewWidth(100)
 
 	thought := ChatMessage{Role: "thought", Content: "checking the request", TurnId: 1}
+	m.visibleConfig.ExpandThinking = true // expanded: label + body both render
 	block, _ := m.renderMessageBlock(0, thought, vpW)
 	// The label (Warning orange) and the body (TextStone) must both pair
 	// their foreground with the surface background.
@@ -1671,8 +1731,8 @@ func TestSlashSheetTypesIntoInput(t *testing.T) {
 	if mm.panelFilter != "" {
 		t.Errorf("filter = %q, want empty after execution", mm.panelFilter)
 	}
-	if mm.visibleConfig.ShowThinking {
-		t.Error("enter should have run /toggle_thinking (ShowThinking off)")
+	if !mm.visibleConfig.ExpandThinking {
+		t.Error("enter should have run /toggle_thinking (expanded)")
 	}
 }
 
@@ -2310,13 +2370,13 @@ func TestRenderCacheVisibilityChangeInvalidates(t *testing.T) {
 	if before == "" {
 		t.Fatal("thought block should render by default")
 	}
-	m.visibleConfig.ShowThinking = false
+	m.visibleConfig.ExpandThinking = true
 	out := m.renderMessages()
-	if strings.Contains(utils.StripANSI(out), "secret") {
-		t.Error("hidden thought must not render")
+	if !strings.Contains(utils.StripANSI(out), "secret") {
+		t.Error("expanded thought must render its content")
 	}
-	if m.renderCache[0].skip != true {
-		t.Error("thought entry should flip to skip=true when hidden")
+	if m.renderCache[0].skip || m.renderCache[0].block == before {
+		t.Error("thought entry should restyle when expansion flips")
 	}
 }
 
@@ -2524,9 +2584,8 @@ func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
 	m.messages = []ChatMessage{
 		{Role: "user", Content: "hi"},
 		{Role: "user", Content: strings.Repeat("x", 66)}, // wraps at the card's inner width
-		{Role: "thought", Content: "thinking out loud"},
+		{Role: "thought"},                                // empty thought, idle: hidden in both modes
 	}
-	m.visibleConfig.ShowThinking = false // hides the thought card
 
 	vpW := layout.GetViewWidth(m.width)
 	heights := m.virtualLineHeights(vpW)
