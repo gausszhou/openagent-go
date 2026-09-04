@@ -64,6 +64,8 @@ func (m *Model) View() tea.View {
 			panel = m.renderConfigPanel()
 		case panelModeHelp:
 			panel = m.renderHelpPanel()
+		case panelModeExport:
+			panel = m.renderExportPanel()
 		case panelModeSearch:
 			panel = m.renderSearchPanel()
 		case panelModeEdit:
@@ -606,9 +608,14 @@ func popupFrame(content string) string {
 // background (lipgloss stretches even blank lines to the block width).
 func (m *Model) popupPanel(title, filter string, rows []string) string {
 	base, contentW := m.popupBase()
+	return m.popupPanelStyled(base, contentW, title, filter, rows, panelFooter(base, contentW, theme.BgPanel))
+}
+
+// popupPanelStyled is popupPanel with a caller-chosen footer line, for
+// panels whose key hints differ from the standard switch/run/close set.
+func (m *Model) popupPanelStyled(base lipgloss.Style, contentW int, title, filter string, rows []string, footer string) string {
 	header := popupHeader(base, contentW, title, filter)
 	list := lipgloss.JoinVertical(lipgloss.Left, rows...)
-	footer := base.Width(contentW).Render(panelFooter(base, contentW, theme.BgPanel))
 	content := lipgloss.JoinVertical(lipgloss.Left, header, "", list, "", footer)
 	return popupFrame(content)
 }
@@ -927,6 +934,28 @@ func (m *Model) renderConfigPanel() string {
 
 // renderHelpPanel draws the /help overlay: a short explanation plus key
 // hints. It is dismiss-only (any key closes it), matching the spec.
+// renderExportPanel surfaces the /export outcome in a dismiss-only dialog:
+// the written file path (hard-wrapped, never truncated — the user needs the
+// whole path) or the reason nothing was written. The footer says so — the
+// standard switch/run/close hints do not apply here.
+func (m *Model) renderExportPanel() string {
+	base, contentW := m.popupBase()
+	var rows []string
+	for _, ln := range strings.Split(m.exportNotice, "\n") {
+		for {
+			r := []rune(ln)
+			if len(r) <= contentW-2 {
+				rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextAsh).Render(ln)))
+				break
+			}
+			rows = append(rows, base.Width(contentW).Render(base.Foreground(theme.TextAsh).Render(string(r[:contentW-2]))))
+			ln = string(r[contentW-2:])
+		}
+	}
+	footer := base.Width(contentW).Render(base.Foreground(theme.TextMute).Render("any key closes"))
+	return m.popupPanelStyled(base, contentW, "Export", "", rows, footer)
+}
+
 func (m *Model) renderHelpPanel() string {
 	base, contentW := m.popupBase()
 
@@ -938,7 +967,7 @@ func (m *Model) renderHelpPanel() string {
 		"  /toggle_*         flip transcript visibility",
 		"  /sessions         resume a past session",
 		"  /models           switch the model",
-		"  /toggle_auto_approve  ask / allow / deny",
+		"  /toggle_mode      auto / manual / plan",
 		"  /exit             quit",
 	}
 	var rows []string

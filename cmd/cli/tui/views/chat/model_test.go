@@ -2213,12 +2213,13 @@ func TestExportTranscriptWritesMarkdown(t *testing.T) {
 		{Role: "assistant", Content: "**bold** reply"},
 		{Role: "tool", TurnId: 0, ToolCallID: "c1", ToolName: "bash", ToolStatus: toolDone, ToolInput: `{"cmd":"ls"}`, ToolOutput: "a.txt"},
 	}
-	upd, cmd := m.executeCommand(panelCommand{slash: "/export", action: actionExport})
-	if cmd == nil {
-		t.Fatal("export should raise a toast cmd")
+	upd, _ := m.executeCommand(panelCommand{slash: "/export", action: actionExport})
+	m2 := upd.(*Model)
+	if !m2.panelOpen || m2.panelMode != panelModeExport {
+		t.Fatal("export should open the dismiss-only export dialog")
 	}
-	if upd.(*Model).notifyMsg == "" {
-		t.Error("export should set a toast")
+	if !strings.Contains(m2.exportNotice, "Transcript exported to:") || !strings.Contains(m2.exportNotice, ".md") {
+		t.Errorf("dialog should name the written file, got %q", m2.exportNotice)
 	}
 	entries, err := os.ReadDir(m.workDir)
 	if err != nil || len(entries) != 1 {
@@ -2233,15 +2234,32 @@ func TestExportTranscriptWritesMarkdown(t *testing.T) {
 	}
 }
 
+// TestExportPanelDismissesOnAnyKey guards the export dialog's dismiss-only
+// interaction: any key closes it (matching the help panel).
+func TestExportPanelDismissesOnAnyKey(t *testing.T) {
+	m := newTestModel()
+	m.panelOpen = true
+	m.panelMode = panelModeExport
+	upd, _ := m.Update(tea.KeyPressMsg{Code: 'x'})
+	if upd.(*Model).panelOpen {
+		t.Error("any key should close the export dialog")
+	}
+}
+
 func TestExportEmptyTranscriptGuard(t *testing.T) {
 	m := newTestModel()
 	m.workDir = t.TempDir()
-	upd, cmd := m.executeCommand(panelCommand{slash: "/export", action: actionExport})
-	if cmd != nil {
-		t.Error("empty export must not raise a toast")
+	upd, _ := m.executeCommand(panelCommand{slash: "/export", action: actionExport})
+	m2 := upd.(*Model)
+	if !m2.panelOpen || m2.panelMode != panelModeExport {
+		t.Fatal("empty export should still surface the dialog")
 	}
-	if upd.(*Model).statusText != "Nothing to export" {
-		t.Errorf("statusText = %q", upd.(*Model).statusText)
+	if !strings.Contains(m2.exportNotice, "Nothing to export") {
+		t.Errorf("exportNotice = %q, want the empty-transcript note", m2.exportNotice)
+	}
+	entries, err := os.ReadDir(m.workDir)
+	if err != nil || len(entries) != 0 {
+		t.Errorf("empty export must not write files, got %v (err %v)", entries, err)
 	}
 }
 

@@ -207,6 +207,10 @@ type Model struct {
 
 	// pluginItems is the installed-plugin list for the plugins panel.
 	pluginItems []string
+
+	// exportNotice is the /export outcome shown in the dismiss-only export
+	// dialog (the written path, or the reason nothing was written).
+	exportNotice string
 }
 
 // panelMode values for the floating overlay.
@@ -219,6 +223,7 @@ const (
 	panelModeEdit
 	panelModePlugins
 	panelModeConfig
+	panelModeExport
 )
 
 // maxHistory caps the input history ring.
@@ -1606,23 +1611,32 @@ func (m *Model) execEditSelection() (tea.Model, tea.Cmd) {
 // next to the workdir and raises a toast with the path.
 func (m *Model) exportTranscript() (tea.Model, tea.Cmd) {
 	if len(m.messages) == 0 {
-		m.statusText = "Nothing to export"
-		return m, nil
+		return m.openExportPanel("Nothing to export yet — send a message first.")
 	}
 	dir := m.workDir
 	if dir == "" {
 		dir = "."
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		m.statusText = "Export failed: " + err.Error()
-		return m, nil
+		return m.openExportPanel("Export failed: " + err.Error())
 	}
 	name := filepath.Join(dir, fmt.Sprintf("chat-%s.md", time.Now().Format("20060102-150405")))
 	if err := os.WriteFile(name, []byte(m.exportMarkdown()), 0o600); err != nil {
-		m.statusText = "Export failed: " + err.Error()
-		return m, nil
+		return m.openExportPanel("Export failed: " + err.Error())
 	}
-	return m, m.notify("Exported " + name)
+	return m.openExportPanel("Transcript exported to:\n" + name)
+}
+
+// openExportPanel surfaces the /export outcome in a dismiss-only dialog: a
+// transient status-bar toast was too easy to miss.
+func (m *Model) openExportPanel(msg string) (tea.Model, tea.Cmd) {
+	m.exportNotice = msg
+	m.panelOpen = true
+	m.panelMode = panelModeExport
+	m.panelFromSlash = false // centered
+	m.panelIdx = 0
+	m.panelFilter = ""
+	return m, nil
 }
 
 // exportMarkdown renders the transcript as a raw Markdown document (no
