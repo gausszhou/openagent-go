@@ -809,15 +809,17 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			default:
 				// "/" on an empty input opens the slash-command picker live,
-				// matching the documented "/" trigger; all other keys
-				// fall through to the textarea below.
+				// matching the documented "/" trigger — and falls through so
+				// the "/" itself lands in the input box: while the sheet is
+				// open the typed text stays in the box (the sheet only
+				// mirrors the matching commands), and Enter runs the
+				// selected command and clears the box.
 				if k.String() == "/" && m.chatTextarea.Value() == "" {
 					m.panelOpen = true
 					m.panelMode = panelModeCommand
 					m.panelFromSlash = true
 					m.panelIdx = 0
 					m.panelFilter = ""
-					return m, nil
 				}
 			}
 		}

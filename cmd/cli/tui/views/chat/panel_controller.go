@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -92,6 +94,48 @@ func (m *Model) handlePanelKey(k tea.KeyPressMsg) (cmd tea.Cmd, handled bool) {
 		return cmd, true
 	}
 
+	// Slash sheet: the typed text lives in the input box (the box shows
+	// "/..." while filtering), not in the panel — printable keys, space and
+	// backspace fall through to the textarea, and the filter re-derives from
+	// the box after every keystroke. The sheet never echoes the query; it
+	// only mirrors the matching commands. Enter runs the selected command
+	// and clears the box (panelExecute); esc closes and resets the box to
+	// the empty state the sheet was opened from; backspacing the slash away
+	// closes the sheet (syncSlashSheet).
+	if m.panelMode == panelModeCommand && m.panelFromSlash {
+		switch k.String() {
+		case "ctrl+c", "esc":
+			// Closing the sheet resets the box too: the sheet only ever
+			// opens on an empty input, so the "/"-filter draft it leaves
+			// behind is transient — keeping it would prefix the next
+			// prompt with "/" or double the slash on a retype.
+			m.chatTextarea.SetValue("")
+			m.panelOpen = false
+			m.panelMode = panelModeCommand
+			m.panelFilter = ""
+		case "up":
+			if n := m.panelItemCount(); n > 0 && m.panelIdx > 0 {
+				m.panelIdx--
+			}
+		case "down":
+			if n := m.panelItemCount(); n > 0 && m.panelIdx < n-1 {
+				m.panelIdx++
+			}
+		case "enter":
+			// Nothing selected (no matches): keep the sheet open so the
+			// draft stays editable instead of bouncing the user.
+			if len(m.buildPanelCommands()) > 0 {
+				_, cmd = m.panelExecute()
+			}
+		default:
+			var tcmd tea.Cmd
+			m.chatTextarea, tcmd = m.chatTextarea.Update(k)
+			cmd = tcmd
+			m.syncSlashSheet()
+		}
+		return cmd, true
+	}
+
 	// Command palette / sessions / models: shared navigation, plus filter
 	// input for the command palette.
 	switch k.String() {
@@ -136,6 +180,26 @@ func (m *Model) handlePanelKey(k tea.KeyPressMsg) (cmd tea.Cmd, handled bool) {
 		}
 	}
 	return cmd, true
+}
+
+// syncSlashSheet re-derives the slash sheet's filter from the input box
+// after the textarea took a keystroke, and closes the sheet once the box
+// stops looking like a command (the "/" backspaced away, a paste without
+// one). The selection resets whenever the filter changes, matching the
+// palette's filter-editing behavior.
+func (m *Model) syncSlashSheet() {
+	v := m.chatTextarea.Value()
+	if !strings.HasPrefix(v, "/") {
+		m.panelOpen = false
+		m.panelMode = panelModeCommand
+		m.panelFilter = ""
+		return
+	}
+	filter := strings.TrimPrefix(v, "/")
+	if filter != m.panelFilter {
+		m.panelFilter = filter
+		m.panelIdx = 0
+	}
 }
 
 // handlePermissionKey routes a keypress while a tool-call permission dialog is

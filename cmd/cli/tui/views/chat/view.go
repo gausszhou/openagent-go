@@ -659,17 +659,9 @@ func (m *Model) renderSlashPanel() string {
 	contentW := max(0, m.inputBoxWidth()-2)
 	base := theme.BaseStyle().Background(theme.BgSurface)
 
-	// No static "Slash commands" title row. While the user filters, a live
-	// "/filter" header plus a hairline replaces the title, and the hairline
-	// collapses away when there is nothing to filter on.
-	var head []string
-	if m.panelFilter != "" {
-		filter := base.Foreground(theme.CommandActive).Render("/" + m.panelFilter)
-		head = append(head,
-			base.Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left, filter)),
-			base.Foreground(theme.BorderGray).Width(contentW).Render(strings.Repeat("─", max(1, contentW-1))),
-		)
-	}
+	// No title row and no query echo: while filtering, the typed text lives
+	// in the input box below the sheet; the sheet only mirrors the matching
+	// commands.
 
 	// Fixed-column rows: icon + slash column + description column. The
 	// slash column is padded to a constant width so every description
@@ -720,19 +712,21 @@ func (m *Model) renderSlashPanel() string {
 	}
 	list := lipgloss.JoinVertical(lipgloss.Left, rows...)
 
-	// Slim key-hint footer, kept inside contentW.
+	// Slim key-hint footer, kept inside contentW. With no matches the
+	// footer says so — without echoing the query (it lives in the input
+	// box, the sheet stays quiet).
 	footer := base.Foreground(theme.TextMute).Width(contentW).
 		Render("↑↓ move · enter run · esc close")
-	if m.panelFilter != "" && len(cmds) == 0 {
+	if len(cmds) == 0 {
 		footer = base.Foreground(theme.CommandActive).Width(contentW).
-			Render("No matches for \"/" + m.panelFilter + "\"")
+			Render("No matching commands")
 	}
 
 	// Frame the pull-up sheet with gray side borders and no frame padding, so
 	// the selected row's orange fill spans edge-to-edge inside the borders.
 	// The surface background is kept so the sheet reads as the input growing
 	// upward; the highlight's own inner pad comes from the row layout.
-	content := lipgloss.JoinVertical(lipgloss.Left, append(head, list, footer)...)
+	content := lipgloss.JoinVertical(lipgloss.Left, list, footer)
 	return drawPanelSides(strings.Split(content, "\n"), theme.BorderGray, theme.BgSurface)
 }
 

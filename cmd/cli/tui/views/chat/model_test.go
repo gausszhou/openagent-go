@@ -1543,6 +1543,127 @@ func TestSlashDoesNotTriggerMidInput(t *testing.T) {
 	}
 }
 
+// TestSlashSheetTypesIntoInput verifies the sheet's filter lives in the
+// input box: "/" opens the sheet and lands in the box, further keys keep
+// typing there (the sheet never echoes them), and Enter runs the selected
+// command and clears the box.
+func TestSlashSheetTypesIntoInput(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if !m.panelOpen || !m.panelFromSlash {
+		t.Fatal("typing / on an empty input should open the slash sheet")
+	}
+	if got := m.chatTextarea.Value(); got != "/" {
+		t.Fatalf("input box = %q, want %q (the slash must land in the box)", got, "/")
+	}
+	m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
+	m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if got := m.chatTextarea.Value(); got != "/thin" {
+		t.Fatalf("input box = %q, want %q (typing must stay in the box)", got, "/thin")
+	}
+	if m.panelFilter != "thin" {
+		t.Errorf("filter = %q, want %q (derived from the box)", m.panelFilter, "thin")
+	}
+	cmds := m.buildPanelCommands()
+	if len(cmds) != 1 || cmds[0].slash != "/toggle_thinking" {
+		t.Fatalf("filter /thin should leave /toggle_thinking, got %+v", cmds)
+	}
+
+	m2, _ := enterKey(m)
+	mm := m2
+	if mm.panelOpen {
+		t.Error("enter should close the sheet")
+	}
+	if got := mm.chatTextarea.Value(); got != "" {
+		t.Errorf("enter should clear the input, got %q", got)
+	}
+	if mm.panelFilter != "" {
+		t.Errorf("filter = %q, want empty after execution", mm.panelFilter)
+	}
+	if mm.visibleConfig.ShowThinking {
+		t.Error("enter should have run /toggle_thinking (ShowThinking off)")
+	}
+}
+
+// TestSlashSheetBackspaceCloses verifies the sheet closes once the box
+// stops looking like a command: backspacing the "/" away empties the box
+// and closes the sheet.
+func TestSlashSheetBackspaceCloses(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.panelOpen {
+		t.Error("backspacing the slash away should close the sheet")
+	}
+	if got := m.chatTextarea.Value(); got != "" {
+		t.Errorf("input box = %q, want empty", got)
+	}
+}
+
+// TestSlashSheetEscResetsBox verifies esc closes the sheet and empties the
+// box: the sheet only opens on an empty input, so the "/"-filter draft is
+// transient — keeping it would prefix the next prompt or double the slash
+// on a retype.
+func TestSlashSheetEscResetsBox(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.panelOpen {
+		t.Error("esc should close the sheet")
+	}
+	if got := m.chatTextarea.Value(); got != "" {
+		t.Errorf("esc should reset the box, got %q", got)
+	}
+}
+
+// TestSlashSheetEnterNoMatchKeepsSheet verifies enter with no matching
+// command is a no-op: the sheet stays open and the draft stays editable
+// (nothing was selected, so nothing runs and nothing is cleared).
+func TestSlashSheetEnterNoMatchKeepsSheet(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.Update(tea.KeyPressMsg{Code: 'z', Text: "z"})
+	m.Update(tea.KeyPressMsg{Code: 'z', Text: "z"})
+	m2, _ := enterKey(m)
+	mm := m2
+	if !mm.panelOpen {
+		t.Error("enter with no matches should keep the sheet open")
+	}
+	if got := mm.chatTextarea.Value(); got != "/zz" {
+		t.Errorf("input box = %q, want %q (kept for editing)", got, "/zz")
+	}
+}
+
+// TestSlashSheetNoQueryEcho verifies the sheet never echoes the typed
+// filter: no "/query" header row while filtering, and the no-match footer
+// does not repeat the query either.
+func TestSlashSheetNoQueryEcho(t *testing.T) {
+	m := newTestModel()
+	m.panelOpen = true
+	m.panelFromSlash = true
+	m.chatTextarea.SetValue("/mo")
+	m.panelFilter = "mo"
+	out := utils.StripANSI(m.renderSlashPanel())
+	for _, ln := range strings.Split(out, "\n") {
+		if ln == "/mo" || strings.HasPrefix(ln, "/mo ") {
+			t.Errorf("sheet echoes the query in a header row:\n%s", out)
+		}
+	}
+	if strings.Contains(out, "No matches for") {
+		t.Errorf("sheet echoes the query in the no-match footer:\n%s", out)
+	}
+
+	// No-match footer stays useful without echoing the query.
+	m.chatTextarea.SetValue("/zz")
+	m.panelFilter = "zz"
+	if out := utils.StripANSI(m.renderSlashPanel()); !strings.Contains(out, "No matching commands") {
+		t.Errorf("no-match footer missing:\n%s", out)
+	}
+}
+
 func TestInputQueueEnqueuesWhileLoading(t *testing.T) {
 	m := newTestModel()
 	m.loading = true
