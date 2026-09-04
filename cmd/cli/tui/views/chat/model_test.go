@@ -77,14 +77,84 @@ func TestWheelIgnoredOutsideViewport(t *testing.T) {
 
 func TestUsageUpdateSetsTokens(t *testing.T) {
 	m := newTestModel()
-	upd, _ := m.Update(usageUpdateMsg{used: 10, total: 100})
-	if got := upd.(*Model).totalTokens; got != "100" {
-		t.Errorf("totalTokens = %q, want %q", got, "100")
+	upd, _ := m.Update(usageUpdateMsg{used: 12300, total: 1000000})
+	m2 := upd.(*Model)
+	if m2.usedTokens != 12300 || m2.contextSize != 1000000 {
+		t.Errorf("usage = %d/%d, want 12300/1000000", m2.usedTokens, m2.contextSize)
 	}
-	// total 0 falls back to used.
-	upd, _ = m.Update(usageUpdateMsg{used: 42, total: 0})
-	if got := upd.(*Model).totalTokens; got != "42" {
-		t.Errorf("totalTokens = %q, want %q", got, "42")
+	// Sidebar shows the consumed context against the window.
+	if got := m2.contextValue(); got != "12.3k / 1M tokens" {
+		t.Errorf("contextValue = %q, want %q", got, "12.3k / 1M tokens")
+	}
+	// A model that never learned the window shows the used count alone
+	// (total 0 falls through — fresh model so no window is remembered).
+	upd, _ = newTestModel().Update(usageUpdateMsg{used: 42, total: 0})
+	if got := upd.(*Model).contextValue(); got != "42 tokens" {
+		t.Errorf("contextValue = %q, want %q", got, "42 tokens")
+	}
+}
+
+func TestFormatTokens(t *testing.T) {
+	cases := map[int]string{
+		0: "0", 834: "834", 12300: "12.3k", 1000000: "1M", 2500000: "2.5M",
+	}
+	for n, want := range cases {
+		if got := formatTokens(n); got != want {
+			t.Errorf("formatTokens(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// TestPromptCountTracked guards the sidebar's turn counter: live sends,
+// queued sends and replayed history each count; /new and a session switch
+// reset it.
+func TestPromptCountTracked(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.chatTextarea.SetValue("one")
+	m2, _ := enterKey(m)
+	if m2.promptCount != 1 {
+		t.Errorf("promptCount = %d, want 1 after first send", m2.promptCount)
+	}
+	// A prompt while one is in flight queues (and counts) immediately.
+	m2.chatTextarea.SetValue("two")
+	m3, _ := enterKey(m2)
+	if m3.promptCount != 2 {
+		t.Errorf("promptCount = %d, want 2 after queued send", m3.promptCount)
+	}
+	// Replayed history counts too.
+	m4, _ := m3.Update(userMessageMsg{text: "replayed"})
+	if m4.(*Model).promptCount != 3 {
+		t.Errorf("promptCount = %d, want 3 after replayed user message", m4.(*Model).promptCount)
+	}
+	// A fresh /new resets the counter with the transcript.
+	m4.(*Model).chatTextarea.SetValue("/new")
+	m5, _ := enterKey(m4.(*Model))
+	if m5.promptCount != 0 {
+		t.Errorf("promptCount = %d, want 0 after /new", m5.promptCount)
+	}
+}
+
+// TestSidebarShowsContextTurnsAndPlanProgress checks the right sidebar's
+// data section: context usage, turn count, and the plan progress title.
+func TestSidebarShowsContextTurnsAndPlanProgress(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 36
+	m.activeSessionID = "sess-1"
+	m.usedTokens = 12300
+	m.contextSize = 1000000
+	m.promptCount = 7
+	m.planEntries = []openacp.PlanEntry{
+		{Content: "step one", Status: "completed"},
+		{Content: "step two", Status: "in_progress"},
+	}
+	right := utils.StripANSI(m.renderRight())
+	for _, want := range []string{"12.3k / 1M tokens", "Turns", "7", "Plans 1/2", "[▶] step two"} {
+		if !strings.Contains(right, want) {
+			t.Errorf("sidebar missing %q:\n%s", want, right)
+		}
 	}
 }
 
@@ -263,7 +333,7 @@ func TestSlashNewReturnsToWelcome(t *testing.T) {
 	m.inChat = true
 	m.activeSessionID = "sess-old"
 	m.messages = append(m.messages, ChatMessage{Role: "user", Content: "hi", TurnId: 0})
-	m.totalTokens = "123"
+	m.usedTokens, m.contextSize, m.promptCount = 123, 0, 2
 	m.loading = true
 
 	m.chatTextarea.SetValue("/new")
@@ -277,8 +347,8 @@ func TestSlashNewReturnsToWelcome(t *testing.T) {
 	if len(m2.messages) != 0 {
 		t.Error("/new should clear the transcript")
 	}
-	if m2.totalTokens != "0" {
-		t.Errorf("totalTokens = %q, want 0", m2.totalTokens)
+	if m2.usedTokens != 0 || m2.contextSize != 0 || m2.promptCount != 0 {
+		t.Errorf("sidebar counters = %d/%d/%d, want all 0", m2.usedTokens, m2.contextSize, m2.promptCount)
 	}
 	if m2.loading {
 		t.Error("/new should drop the in-flight prompt state")
@@ -291,7 +361,7 @@ func TestSlashNewReturnsToWelcome(t *testing.T) {
 func TestNewSessionMsgBareCreationKeepsTranscript(t *testing.T) {
 	m := newTestModel()
 	m.messages = append(m.messages, ChatMessage{Role: "user", Content: "hi", TurnId: 0})
-	m.totalTokens = "123"
+	m.usedTokens, m.contextSize, m.promptCount = 123, 0, 2
 	upd, _ := m.Update(newSessionMsg{sessionID: "sess-new"})
 	m2 := upd.(*Model)
 	if m2.activeSessionID != "sess-new" {

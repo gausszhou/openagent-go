@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 	"image/color"
 	"strings"
@@ -354,13 +355,20 @@ func (m *Model) renderStatus() string {
 	return m.statusBar.View()
 }
 
-// renderPlanList draws the agent's plan as a TODO list ("Plans" + status
+// renderPlanList draws the agent's plan as a TODO list ("Plans n/m" + status
 // checkboxes) in the right sidebar. Empty when no plan has arrived.
 func (m *Model) renderPlanList(background lipgloss.Style, width int) string {
 	if len(m.planEntries) == 0 {
 		return background.Width(width).Render("")
 	}
-	title := background.Width(width).Foreground(theme.TextNormal).Bold(true).Render("Plans")
+	done := 0
+	for _, e := range m.planEntries {
+		if e.Status == "completed" {
+			done++
+		}
+	}
+	title := background.Width(width).Foreground(theme.TextNormal).Bold(true).
+		Render(fmt.Sprintf("Plans %d/%d", done, len(m.planEntries)))
 	rows := []string{title}
 	for _, e := range m.planEntries {
 		mark := "[ ]"
@@ -378,6 +386,38 @@ func (m *Model) renderPlanList(background lipgloss.Style, width int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
+// formatTokens renders a token count compactly for the sidebar: 834,
+// 12.3k, 1.2M (a trailing .0 is trimmed).
+func formatTokens(n int) string {
+	compact := func(v float64, suffix string) string {
+		s := strconv.FormatFloat(v, 'f', 1, 64)
+		return strings.TrimSuffix(s, ".0") + suffix
+	}
+	switch {
+	case n >= 1_000_000:
+		return compact(float64(n)/1_000_000, "M")
+	case n >= 1_000:
+		return compact(float64(n)/1_000, "k")
+	default:
+		return strconv.Itoa(n)
+	}
+}
+
+// contextValue renders the sidebar's context line: "used / window tokens"
+// once usage has been reported, the window alone before the first update.
+func (m *Model) contextValue() string {
+	switch {
+	case m.usedTokens > 0 && m.contextSize > 0:
+		return fmt.Sprintf("%s / %s tokens", formatTokens(m.usedTokens), formatTokens(m.contextSize))
+	case m.contextSize > 0:
+		return formatTokens(m.contextSize) + " tokens"
+	case m.usedTokens > 0:
+		return formatTokens(m.usedTokens) + " tokens"
+	default:
+		return "0 tokens"
+	}
+}
+
 func (m *Model) renderRight() string {
 	width := layout.GetRightWidth(m.width)
 	if width <= 0 {
@@ -390,12 +430,15 @@ func (m *Model) renderRight() string {
 	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.activeSessionID)
 
 	contextTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Context")
-	contextValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.totalTokens + " tokens")
+	contextText := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.contextValue())
+	turnsTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Turns")
+	turnsValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.promptCount))
 
 	todoContent := m.renderPlanList(background, width-1)
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		sessionTitle, sessionValue, "",
-		contextTitle, contextValue, "",
+		contextTitle, contextText, "",
+		turnsTitle, turnsValue, "",
 		todoContent,
 	)
 

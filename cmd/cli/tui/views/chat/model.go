@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -114,7 +113,13 @@ type Model struct {
 	// status line.
 	notifyMsg string
 
-	totalTokens string
+	// Token usage (usage_update) and prompt count, shown in the right
+	// sidebar: usedTokens is the session's consumed context, contextSize
+	// the model's window, promptCount the prompts sent in the current
+	// session (live sends plus replayed history).
+	usedTokens  int
+	contextSize int
+	promptCount int
 
 	needAutoScroll bool
 
@@ -483,8 +488,6 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 
 		statusText: "",
 
-		totalTokens: "0",
-
 		needAutoScroll: true,
 
 		modelId:    "",
@@ -744,6 +747,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.inChat = true
 					m.updateInputWidth() // welcome box is narrower than chat; re-fit on page switch
 					m.inputQueue = append(m.inputQueue, text)
+					m.promptCount++
 					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
@@ -764,6 +768,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 				m.inputQueue = append(m.inputQueue, text)
+				m.promptCount++
 				m.closeTrailingThought()
 				m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
 				m.chatTextarea.SetValue("")
@@ -772,6 +777,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 				}
 				// User message → transcript, then async Prompt to ACP.
+				m.promptCount++
 				m.messages = append(m.messages, ChatMessage{
 					Role:    "user",
 					Content: text,
@@ -957,9 +963,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case usageUpdateMsg:
 		if msg.total > 0 {
-			m.totalTokens = strconv.Itoa(msg.total)
-		} else if msg.used > 0 {
-			m.totalTokens = strconv.Itoa(msg.used)
+			m.contextSize = msg.total
+		}
+		if msg.used > 0 {
+			m.usedTokens = msg.used
 		}
 		return m, nil
 	case modeUpdateMsg:
@@ -1029,10 +1036,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.notify("Session created")
 	case userMessageMsg:
-		// Replayed user message during session/load history replay.
+		// Replayed user message during session/load history replay. Each
+		// replayed prompt counts toward the session's turn count.
 		if strings.TrimSpace(msg.text) == "" {
 			return m, nil
 		}
+		m.promptCount++
 		m.messages = append(m.messages, ChatMessage{Role: "user", Content: msg.text, TurnId: m.turnId})
 		m.trimMessageStore()
 		m.viewportDirty = true
@@ -1451,7 +1460,7 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		m.messages = nil
 		m.inputQueue = nil
 		m.pendingConfigSet = nil
-		m.totalTokens = "0"
+		m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
 		m.loading = false
 		m.inChat = false
 		m.updateInputWidth() // welcome box is narrower than chat; re-fit on page switch
@@ -1778,6 +1787,9 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	// invisible (View renders welcome until inChat is set).
 	m.inChat = true
 	m.messages = nil
+	// The target session's own replay re-counts turns; usage waits for its
+	// first usage_update.
+	m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
 	m.loading = true
 	m.replaying = true
 	m.statusText = "Loading session..."
