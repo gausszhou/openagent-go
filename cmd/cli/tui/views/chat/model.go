@@ -410,6 +410,17 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 	styles.Focused.Placeholder = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
 	styles.Blurred.Base = theme.BaseStyle().Background(theme.BgSurface)
 	styles.Blurred.Placeholder = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	// The cursor's blink-off cell renders with the CursorLine style; leave
+	// its background unset and the cell carries no explicit bg of its own —
+	// the renderer may then repaint it with the terminal's default
+	// background (a theme-colored block flashing over the input). Pin it to
+	// the surface so both blink phases stay on the card color. EndOfBuffer
+	// styles the filler rows the same way: its default foreground is ANSI
+	// palette 0, which the terminal theme resolves (aubergine on GNOME).
+	styles.Focused.CursorLine = lipgloss.NewStyle().Background(theme.BgSurface)
+	styles.Blurred.CursorLine = lipgloss.NewStyle().Background(theme.BgSurface)
+	styles.Focused.EndOfBuffer = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	styles.Blurred.EndOfBuffer = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
 	// Re-enable the cursor blink: replacing the default Styles{} zeroes the
 	// Cursor struct, which would otherwise leave the cursor static.
 	// White cursor block, matching opencode: the virtual cursor renders the
