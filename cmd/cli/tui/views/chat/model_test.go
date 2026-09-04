@@ -254,21 +254,51 @@ func TestToggleIconTracksConfig(t *testing.T) {
 	}
 }
 
-func TestNewSessionMsgResetsTranscript(t *testing.T) {
+// TestSlashNewReturnsToWelcome guards /new's semantics: it returns to the
+// welcome page (the state a fresh boot starts from) without eagerly
+// creating a session — the next prompt lazily creates one, and an
+// in-flight prompt is abandoned.
+func TestSlashNewReturnsToWelcome(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.activeSessionID = "sess-old"
+	m.messages = append(m.messages, ChatMessage{Role: "user", Content: "hi", TurnId: 0})
+	m.totalTokens = "123"
+	m.loading = true
+
+	m.chatTextarea.SetValue("/new")
+	m2, _ := enterKey(m)
+	if m2.inChat {
+		t.Error("/new should return to the welcome page")
+	}
+	if m2.activeSessionID != "" {
+		t.Errorf("activeSessionID = %q, want empty (next prompt creates a fresh session)", m2.activeSessionID)
+	}
+	if len(m2.messages) != 0 {
+		t.Error("/new should clear the transcript")
+	}
+	if m2.totalTokens != "0" {
+		t.Errorf("totalTokens = %q, want 0", m2.totalTokens)
+	}
+	if m2.loading {
+		t.Error("/new should drop the in-flight prompt state")
+	}
+}
+
+// TestNewSessionMsgBareCreationKeepsTranscript guards the bare newSessionMsg
+// fallback: it adopts the fresh session but never touches the transcript —
+// transcript resets belong to /new, which does not go through here.
+func TestNewSessionMsgBareCreationKeepsTranscript(t *testing.T) {
 	m := newTestModel()
 	m.messages = append(m.messages, ChatMessage{Role: "user", Content: "hi", TurnId: 0})
-	m.activeSessionID = "sess-old"
 	m.totalTokens = "123"
 	upd, _ := m.Update(newSessionMsg{sessionID: "sess-new"})
 	m2 := upd.(*Model)
 	if m2.activeSessionID != "sess-new" {
 		t.Errorf("activeSessionID = %q, want sess-new", m2.activeSessionID)
 	}
-	if len(m2.messages) != 0 {
-		t.Error("new session should clear the transcript")
-	}
-	if m2.totalTokens != "0" {
-		t.Errorf("totalTokens = %q, want 0", m2.totalTokens)
+	if len(m2.messages) != 1 {
+		t.Error("bare creation must not clear the transcript")
 	}
 	if m2.loading {
 		t.Error("new session should clear loading")

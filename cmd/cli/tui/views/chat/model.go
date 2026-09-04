@@ -985,11 +985,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sendPrompt(text)
 			return m, modelSet
 		}
-		// Explicit new session (ctrl+n): reset the transcript.
+		// Every new-session trigger carries work — a queued first prompt, a
+		// pending config pick, or a pending /models panel — and all of the
+		// paths above returned. A bare creation just surfaces itself; the
+		// /new reset does not go through here anymore (it never creates a
+		// session, it returns to the welcome page directly).
 		m.loading = false
-		m.messages = nil
-		m.totalTokens = "0"
-		m.statusText = ""
 		m.viewportDirty = true
 		if modelSet != nil {
 			return m, modelSet
@@ -1405,11 +1406,24 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 			m.statusText = "No active session to reset"
 			return m, nil
 		}
-		if m.acpSession == nil {
-			m.statusText = "Backend not connected"
-			return m, nil
+		// /new returns to the welcome page — the state a fresh boot starts
+		// from. No session is created eagerly: the next prompt lazily
+		// creates one, and the old session stays resumable via /sessions.
+		// An in-flight prompt is abandoned (cancelled) first.
+		if m.loading {
+			m.cancelPrompt()
 		}
-		return m, m.newSessionCmd()
+		m.activeSessionID = ""
+		m.messages = nil
+		m.inputQueue = nil
+		m.pendingConfigSet = nil
+		m.totalTokens = "0"
+		m.loading = false
+		m.inChat = false
+		m.updateInputWidth() // welcome box is narrower than chat; re-fit on page switch
+		m.viewportDirty = true
+		m.statusText = ""
+		return m, nil
 	case actionSessions:
 		if m.acpSession == nil {
 			m.statusText = "Backend not connected"
