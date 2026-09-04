@@ -302,9 +302,11 @@ type panelCommand struct {
 	space   bool // toggles with the space key when the filter is empty
 }
 
-// allPanelCommands is the static command registry. It mirrors
-// components.NewCommandList; the two stay in sync manually until the
-// registry moves here.
+// allPanelCommands is the static command registry. Commands whose
+// functionality has not landed yet stay out of the list entirely (parked:
+// /update_skills is still the "not implemented" stub, /plugins only listed
+// a directory nothing consumes) — re-enable by adding a line here; the
+// executeCommand handlers are kept.
 func allPanelCommands() []panelCommand {
 	return []panelCommand{
 		{"/sessions", "Switch session", actionSessions, true, false},
@@ -322,9 +324,7 @@ func allPanelCommands() []panelCommand {
 		{"/export", "Export transcript to Markdown", actionExport, true, false},
 		{"/edit", "Edit a past user message", actionEdit, true, false},
 		{"/theme", "Cycle color theme", actionTheme, true, true},
-		{"/plugins", "List installed plugins", actionPlugins, true, false},
 		{"/split", "Toggle split view", actionSplit, true, false},
-		{"/update_skills", "Update skills", actionUpdateSkills, true, false},
 		{"/exit", "Exit the app", actionExit, true, false},
 	}
 }
@@ -1218,14 +1218,14 @@ func (m *Model) buildPanelCommands() []panelCommand {
 }
 
 // commandEnabled reports whether a slash command can run right now. The
-// session/model/skills commands need a live ACP backend; toggles and exit
-// always work. Disabled commands stay visible in the panel, rendered dimmed.
+// session/model commands need a live ACP backend; toggles and exit always
+// work. Disabled commands stay visible in the panel, rendered dimmed.
 func (m *Model) commandEnabled(pc panelCommand) bool {
 	if !pc.enabled {
 		return false
 	}
 	switch pc.action {
-	case actionSessions, actionModels, actionNew, actionUpdateSkills:
+	case actionSessions, actionModels, actionNew:
 		return m.acpSession != nil
 	}
 	return true
