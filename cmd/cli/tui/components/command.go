@@ -26,7 +26,7 @@ func NewCommandList() []Command {
 		{Title: "Switch session", Key: "", Slash: "/sessions", Alias: "", Icon: "", Enable: true},
 		{Title: "New session", Key: "", Slash: "/new", Alias: "", Icon: "", Enable: true},
 		{Title: "Switch model", Key: "", Slash: "/models", Alias: "", Icon: "", Enable: true},
-		{Title: "Toggle auto approve", Key: "", Slash: "/toggle_auto_approve", Alias: "", Icon: "", Enable: true},
+		{Title: "Switch mode", Key: "", Slash: "/toggle_mode", Alias: "", Icon: "", Enable: true},
 		{Title: "Toggle thinking content", Key: "", Slash: "/toggle_thinking", Alias: "", Icon: "○", Enable: true, Space: true},
 		{Title: "Toggle skill tools", Key: "", Slash: "/toggle_skill", Alias: "", Icon: "○", Enable: true, Space: true},
 		{Title: "Toggle shell tools", Key: "", Slash: "/toggle_shell", Alias: "", Icon: "○", Enable: true, Space: true},
