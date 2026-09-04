@@ -10,13 +10,14 @@ import (
 
 // ── line-level virtual scrolling (17.2) ──
 //
-// The viewport is fed a *windowed* document: messages whose estimated row
-// range intersects the visible window are styled (through the per-message
-// render cache) and their rows are emitted verbatim; every other row is a
-// cheap placeholder. Styling cost is therefore proportional to the visible
-// window, not to the whole transcript, and scrolling supplements newly
-// visible messages on demand. Positioning uses cheap per-message row
-// estimates — the rows actually drawn come from the styled blocks.
+// The viewport is fed a *windowed* document: messages whose row range
+// intersects the visible window are styled (through the per-message render
+// cache) and their rows are emitted verbatim; every other row is a cheap
+// placeholder. Styling cost is proportional to the visible window plus a
+// one-time pass that measures every message's exact rendered height (the
+// cache makes the measurement free after the first feed). Positioning uses
+// those exact heights — the rows actually drawn come from the styled
+// blocks, so window math and drawn rows can never drift apart.
 
 // placeholderRow is the muted gutter row shown for off-window lines. The
 // padding is measured with the same width function fitRow uses, so the row
@@ -49,58 +50,34 @@ func fitRow(row string, vpW int) string {
 	}
 }
 
-// estLines estimates how many terminal rows a message's block occupies at
-// the given content width. Used only for virtual-scroll positioning; the
-// rows drawn come from the styled block. Overestimating slightly degrades
-// into one wasted placeholder row; underestimating truncates styling.
-func estLines(msg ChatMessage, vpW int) int {
-	if vpW <= 0 {
-		return 1
-	}
-	if msg.Role == "tool" {
-		// Icon row (+ folded input) and up to defaultToolOutputLines of
-		// output when details are shown.
-		n := 1
-		if msg.ToolInput != "" {
-			n++
-		}
-		if msg.ToolOutput != "" {
-			n += min(defaultToolOutputLines, len(strings.Split(utils.UnifiedEndOfLine(msg.ToolOutput), "\n")))
-		}
-		return max(1, n)
-	}
-	// User/assistant blocks carry a 1-row margin top and bottom; plain text
-	// wraps at vpW columns (plus 1 column of padding per side). Assistant
-	// replies keep a slightly larger estimate (the markdown renderer's own
-	// spacing); overestimates only cost a placeholder row.
-	overhead := 2
-	if msg.Role == "assistant" {
-		overhead = 4
-	}
-	rows := 0
-	for _, ln := range strings.Split(utils.UnifiedEndOfLine(msg.Content), "\n") {
-		cols := utils.DisplayWidth(ln) + 2
-		rows += max(1, (cols+vpW-1)/vpW)
-	}
-	return max(1, overhead+rows)
-}
-
-// virtualLineHeights returns the estimated height of every message.
+// virtualLineHeights returns the exact rendered height of every message, in
+// viewport rows. Heights come from the styled blocks themselves (through the
+// per-message render cache, so each block is styled once) — any estimate
+// drifts from reality as soon as the card chrome changes, and a short
+// estimate makes the virtual window cut the block's bottom padding and
+// margin rows off. Hidden (visibility-gated) messages occupy no rows.
 func (m *Model) virtualLineHeights(vpW int) []int {
 	h := make([]int, len(m.messages))
 	for i := range m.messages {
-		h[i] = estLines(m.messages[i], vpW)
+		block, skip := m.renderMessageBlock(i, m.messages[i], vpW)
+		if skip || block == "" {
+			continue
+		}
+		h[i] = strings.Count(block, "\n") + 1
 	}
 	return h
 }
 
-// virtualPrefixLines returns the sum of estimated rows before message idx,
+// virtualPrefixLines returns the sum of rendered rows before message idx,
 // i.e. the content line at which the message starts.
 func (m *Model) virtualPrefixLines(idx int) int {
 	vpW := layout.GetViewWidth(m.width)
 	n := 0
-	for i := 0; i < idx && i < len(m.messages); i++ {
-		n += estLines(m.messages[i], vpW)
+	for i, h := range m.virtualLineHeights(vpW) {
+		if i >= idx {
+			break
+		}
+		n += h
 	}
 	return n
 }

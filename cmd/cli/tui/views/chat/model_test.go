@@ -2514,19 +2514,35 @@ func TestTrimMessageStoreKeepsNewestWhenAloneOverBudget(t *testing.T) {
 
 // ── line-level virtual scrolling (17.2) ──
 
-func TestEstLinesWrapAndOverhead(t *testing.T) {
-	if got := estLines(ChatMessage{Role: "user", Content: "hi"}, 20); got != 3 {
-		t.Errorf("short user msg est = %d, want 3 (2 margin + 1 row)", got)
+func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "user", Content: strings.Repeat("x", 66)}, // wraps at the card's inner width
+		{Role: "thought", Content: "thinking out loud"},
 	}
-	if got := estLines(ChatMessage{Role: "user", Content: strings.Repeat("x", 66)}, 20); got != 6 {
-		t.Errorf("wrapped user msg est = %d, want 6 (2 margin + 4 wrapped rows)", got)
+	m.visibleConfig.ShowThinking = false // hides the thought card
+
+	vpW := layout.GetViewWidth(m.width)
+	heights := m.virtualLineHeights(vpW)
+
+	// Heights must equal the real rendered block heights: the virtual
+	// window cuts (or pads) a message's rows whenever they drift apart,
+	// which is how card bottom padding used to vanish.
+	for i, msg := range m.messages {
+		block, skip := m.renderMessageBlock(i, msg, vpW)
+		if skip {
+			if heights[i] != 0 {
+				t.Errorf("hidden message %d height = %d, want 0", i, heights[i])
+			}
+			continue
+		}
+		if want := strings.Count(block, "\n") + 1; heights[i] != want {
+			t.Errorf("message %d height = %d, want rendered %d", i, heights[i], want)
+		}
 	}
-	if got := estLines(ChatMessage{Role: "assistant", Content: "hi"}, 20); got != 5 {
-		t.Errorf("assistant msg est = %d, want 5 (markdown margins)", got)
-	}
-	tool := ChatMessage{Role: "tool", ToolName: "bash", ToolOutput: strings.Join(make([]string, 9), "\n")}
-	if got := estLines(tool, 20); got != 6 {
-		t.Errorf("tool output est = %d, want 6 (icon + folded 5 rows)", got)
+	if heights[0] != 5 {
+		t.Errorf("short user msg height = %d, want 5 (margin, pad, text, pad, margin)", heights[0])
 	}
 }
 
@@ -2535,20 +2551,38 @@ func TestVirtualDocStylesOnlyVisibleWindow(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		m.messages = append(m.messages, ChatMessage{Role: "user", Content: "m" + strconv.Itoa(i)})
 	}
-	m.chatViewport.SetHeight(4) // window rows [0,4): messages 0 and 1
-	m.renderVirtualDoc(4)
+	m.chatViewport.SetHeight(4) // window rows [0,4)
+	doc := m.renderVirtualDoc(4)
 
-	if len(m.renderCache) != 2 {
-		t.Fatalf("cache entries = %d, want 2 (only the visible window styled)", len(m.renderCache))
+	// Measuring the exact heights styles every message once (through the
+	// render cache); the windowing now lives in the ROWS: inside the window
+	// the doc carries the real block rows, everywhere else placeholders.
+	if len(m.renderCache) != 6 {
+		t.Fatalf("cache entries = %d, want 6 (height measurement styles all)", len(m.renderCache))
 	}
-	for i := 0; i < 2; i++ {
-		if _, ok := m.renderCache[i]; !ok {
-			t.Errorf("visible message %d should be styled", i)
+	lines := strings.Split(doc, "\n")
+	heights := m.virtualLineHeights(layout.GetViewWidth(m.width))
+	total := 0
+	for _, h := range heights {
+		total += h
+	}
+	if len(lines) != total {
+		t.Fatalf("doc rows = %d, want %d (sum of exact heights)", len(lines), total)
+	}
+	// Message 0's height is 5 ([margin, pad, text, pad, margin]), but the
+	// window is 4 rows: rows [0,4) are its real block rows (the margin row
+	// has no rail) and everything below is placeholder filler.
+	if strings.TrimSpace(utils.StripANSI(lines[0])) != "" {
+		t.Errorf("row 0 should be the card's top margin:\n%q", lines[0])
+	}
+	for i := 1; i < 4; i++ {
+		if !strings.Contains(lines[i], "┃") {
+			t.Errorf("in-window row %d should be a real card row:\n%q", i, lines[i])
 		}
 	}
-	for i := 2; i < 6; i++ {
-		if _, ok := m.renderCache[i]; ok {
-			t.Errorf("off-window message %d must NOT be styled", i)
+	for i := 4; i < len(lines); i++ {
+		if !strings.Contains(lines[i], "┆") {
+			t.Errorf("out-of-window row %d should be a placeholder:\n%q", i, lines[i])
 		}
 	}
 }
@@ -2560,7 +2594,7 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 	}
 	m.chatViewport.SetHeight(4)
 
-	m.renderVirtualDoc(4) // window [0,4): messages 0,1
+	m.renderVirtualDoc(4) // height measurement styles every message once
 	first := m.renderCache[0].block
 	if first == "" {
 		t.Fatal("message 0 should be styled at the top")
@@ -2568,9 +2602,10 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 
 	// Feed the viewport (as renderLeft does) so ScrollDown has a non-empty
 	// document to scroll within; the virtual feed then refeeds at the new
-	// offset, supplementing the newly revealed messages 2 and 3 while the
-	// message left behind keeps its cached block and 4/5 stay unstyled.
-	// Auto-scroll is off so the window stays anchored at the top.
+	// offset. The measurement pass styles everything up front, so the
+	// property left to guard is that the exited message reuses its cached
+	// block instead of restyling, and the refeed at the new offset keeps
+	// the document stable. Auto-scroll is off so the window stays anchored.
 	m.needAutoScroll = false
 	m.feedViewport(4)
 	m.chatViewport.ScrollDown(6)
@@ -2578,21 +2613,15 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 		t.Fatalf("offset = %d, want 6", m.chatViewport.YOffset())
 	}
 	m.feedViewport(4)
-	for _, i := range []int{2, 3} {
-		if _, ok := m.renderCache[i]; !ok {
-			t.Errorf("newly visible message %d should be supplemented on scroll", i)
-		}
-	}
 	if m.renderCache[0].block != first {
 		t.Error("exited message must reuse its cached block, not restyle")
 	}
-	if len(m.renderCache) != 4 {
-		t.Errorf("cache entries = %d, want 4", len(m.renderCache))
-	}
-	for _, i := range []int{4, 5} {
-		if _, ok := m.renderCache[i]; ok {
-			t.Errorf("message %d still below the window must not be styled", i)
-		}
+	// The refeed at offset 6 must show real rows for the newly revealed
+	// message 2 (its row range covers offset 6) rather than placeholders.
+	doc := m.renderVirtualDoc(4)
+	lines := strings.Split(doc, "\n")
+	if len(lines) < 7 || !strings.Contains(lines[6], "┃") {
+		t.Errorf("row 6 after refeed should be a real card row:\n%q", lines[min(6, len(lines)-1)])
 	}
 }
 
@@ -2611,11 +2640,11 @@ func TestVirtualDocUniformRowWidthAndTotal(t *testing.T) {
 	}
 	m.chatViewport.SetContent(doc)
 	want := 0
-	for i := range m.messages {
-		want += estLines(m.messages[i], vpW)
+	for _, h := range m.virtualLineHeights(vpW) {
+		want += h
 	}
 	if got := m.chatViewport.TotalLineCount(); got != want {
-		t.Errorf("viewport total = %d, want %d (estimated rows)", got, want)
+		t.Errorf("viewport total = %d, want %d (exact rendered rows)", got, want)
 	}
 }
 
