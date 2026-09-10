@@ -146,3 +146,21 @@ func TestPlainCells(t *testing.T) {
 		t.Fatalf("got %q, want 中", got)
 	}
 }
+
+func TestSanitizeControl(t *testing.T) {
+	// ESC (and therefore every ANSI/OSC sequence), BEL, NUL and DEL are
+	// dropped; \n and \t survive and \r\n is normalized.
+	in := "ok\x1b]52;c;Zm9v\x07\x1b[31mred\x1b[0m\r\nline2\tend\x00\x7f"
+	want := "ok]52;c;Zm9v[31mred[0m\nline2\tend"
+	if got := SanitizeControl(in); got != want {
+		t.Fatalf("SanitizeControl = %q, want %q", got, want)
+	}
+	// Clean input is returned unchanged.
+	if got := SanitizeControl("plain text 你好"); got != "plain text 你好" {
+		t.Fatalf("SanitizeControl changed clean input: %q", got)
+	}
+	// C1 controls (U+0080–U+009F) are dropped too.
+	if got := SanitizeControl("a\u009bb"); got != "ab" {
+		t.Fatalf("C1 control survived: %q", got)
+	}
+}

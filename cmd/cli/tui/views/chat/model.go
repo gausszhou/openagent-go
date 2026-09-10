@@ -1160,7 +1160,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── ACP streaming events ──
 	case acpReadyMsg:
-		m.activeSessionID = msg.sessionID
+		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
 		m.sessionTitle = ""
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
@@ -1317,7 +1317,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "New session failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.activeSessionID = msg.sessionID
+		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
 		m.sessionTitle = "" // fresh session: title arrives via session_info_update
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
@@ -1405,8 +1405,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "Load session failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.activeSessionID = msg.sessionID
-		m.sessionTitle = msg.title
+		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
+		m.sessionTitle = utils.SanitizeControl(msg.title)
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 		}
@@ -1511,7 +1511,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = ""
 		}
 		m.closeTrailingThought()
-		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error(), CreatedAt: time.Now()})
+		m.messages = append(m.messages, ChatMessage{Role: "error", Content: utils.SanitizeControl(msg.err.Error()), CreatedAt: time.Now()})
 		m.loading = false
 		m.viewportDirty = true
 		return m, nil
