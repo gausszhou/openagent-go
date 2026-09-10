@@ -1349,6 +1349,9 @@ func (m *Model) renderSearchPanel() string {
 	default:
 		first, last := m.windowPanelRows(len(m.searchResults))
 		for i, mi := range m.searchResults[first:last] {
+			if mi < 0 || mi >= len(m.messages) {
+				continue // stale match from a trimmed transcript
+			}
 			src := m.messages[mi]
 			snippet := src.Role + ": " + utils.TruncateByWidth(
 				strings.Join(strings.Split(utils.UnifiedEndOfLine(src.Content), "\n")[:1], ""), contentW-4)

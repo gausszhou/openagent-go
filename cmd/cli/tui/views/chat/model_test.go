@@ -3920,6 +3920,41 @@ func TestTrimMessageStoreKeepsNewestWhenAloneOverBudget(t *testing.T) {
 	}
 }
 
+// A trim while the search overlay is open must remap its stored indices;
+// otherwise renderSearchPanel indexes past the shortened slice and panics.
+func TestTrimMessageStoreRemapsSearchResults(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.width, m.height = 120, 36
+	big := strings.Repeat("a", 100_000)
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: big})
+	}
+	m.openSearchPanel()
+	m.panelFilter = "a"
+	m.refreshSearch()
+	if len(m.searchResults) != 30 {
+		t.Fatalf("searchResults = %d, want 30", len(m.searchResults))
+	}
+
+	// Streaming appends a chunk and trims the oldest messages while the
+	// search panel is still open.
+	m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: big})
+	m.trimMessageStore()
+	if len(m.messages) >= 30 {
+		t.Fatalf("expected trim to drop messages, got %d", len(m.messages))
+	}
+	for _, idx := range m.searchResults {
+		if idx < 0 || idx >= len(m.messages) {
+			t.Fatalf("stale search index %d (len=%d)", idx, len(m.messages))
+		}
+	}
+	// Rendering and jumping must not panic.
+	_ = m.renderSearchPanel()
+	m.panelIdx = 0
+	_, _ = m.execSearchSelection()
+}
+
 // ── line-level virtual scrolling (17.2) ──
 
 func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {

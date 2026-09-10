@@ -1811,6 +1811,22 @@ func (m *Model) trimMessageStore() {
 				delete(m.renderCache, s)
 			}
 		}
+		// searchResults stores transcript indices, so dropping the oldest
+		// messages shifts every match. Remap them in place (matches in the
+		// dropped prefix fall away) — otherwise the search overlay would
+		// index past the shortened slice and panic.
+		if len(m.searchResults) > 0 {
+			kept := m.searchResults[:0]
+			for _, idx := range m.searchResults {
+				if idx >= drop {
+					kept = append(kept, idx-drop)
+				}
+			}
+			m.searchResults = kept
+			if m.panelIdx >= len(m.searchResults) {
+				m.panelIdx = 0
+			}
+		}
 		m.messages = m.messages[drop:]
 	}
 }
@@ -2288,6 +2304,9 @@ func (m *Model) execSearchSelection() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	idx := m.searchResults[m.panelIdx]
+	if idx < 0 || idx >= len(m.messages) {
+		return m, nil
+	}
 	// Jump via the virtual line mapping: feed a document whose styled
 	// window is the destination (SetYOffset clamps against it), then place
 	// the match's first estimated row at the top of the window.
