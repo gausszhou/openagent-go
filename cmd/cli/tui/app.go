@@ -74,7 +74,7 @@ func StartInteractiveTUI(ctx context.Context, cfg config.Config) error {
 	p := tea.NewProgram(model, tea.WithColorProfile(colorprofile.TrueColor))
 	model.SetProgram(p)
 
-	go startACPInProcess(ctx, model, p, cfg, ver, workDir)
+	go startACPInProcess(ctx, p, cfg, ver)
 
 	_, err := p.Run()
 	return err
@@ -82,9 +82,10 @@ func StartInteractiveTUI(ctx context.Context, cfg config.Config) error {
 
 // startACPInProcess creates two os.Pipe pairs for client↔server communication.
 // The ACP server runs in a goroutine via RunACPTransport; the client connects
-// via ConnectIO, performs the initialize/newSession handshake, registers the
-// event handler, and injects the session into the model.
-func startACPInProcess(ctx context.Context, model *chat.Model, p *tea.Program, cfg config.Config, ver, workDir string) {
+// via ConnectIO, performs the initialize/newSession handshake, and injects the
+// session into the model through the event loop (Program.Send), so the model's
+// backend handle is never written from this goroutine.
+func startACPInProcess(ctx context.Context, p *tea.Program, cfg config.Config, ver string) {
 	// os.Pipe (buffered, 64KB) lets the client write requests before the
 	// server finishes building; they buffer until RunTransport reads.
 	serverR, clientW, err := os.Pipe()
@@ -122,7 +123,7 @@ func startACPInProcess(ctx context.Context, model *chat.Model, p *tea.Program, c
 	handler := chat.NewAcpEventHandler(p)
 	sess.SetEventHandler(handler)
 	sess.SetClientRequestHandler(handler)
-	model.SetACPSession(sess)
+	p.Send(chat.AcpSessionConnectedMsg(sess))
 	// The ACP session is created lazily on the user's first prompt — merely
 	// opening the program (and the welcome page) must not persist a session.
 	// ActiveSessionID stays empty until the first NewSession lands.

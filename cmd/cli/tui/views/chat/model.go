@@ -672,18 +672,18 @@ func (m *Model) SetProgram(p *tea.Program) {
 	m.program = p
 }
 
-// SetACPSession injects the ACP session once the in-process backend
-// connection is established. Called by startACPInProcess in app.go.
-func (m *Model) SetACPSession(s *openacp.Session) {
-	m.acpSession = s
-}
-
 // ── ACP tea.Msg types ──
 
 type acpReadyMsg struct {
 	sessionID     string
 	configOptions []openacp.SessionConfigOption
 }
+
+// acpConnectedMsg delivers the connected ACP session into the event loop.
+// The backend handshake runs on a goroutine, so the session handle must be
+// installed here (not written straight onto the Model) to keep the field
+// single-goroutine and race-free.
+type acpConnectedMsg struct{ session *openacp.Session }
 type agentMessageMsg struct {
 	text      string
 	createdAt time.Time // from replay _meta; zero on live streams (stamp on arrival)
@@ -796,6 +796,13 @@ type permissionRequestMsg struct {
 
 // Exported constructors for app.go to send these msgs from the ACP goroutine.
 func AcpReadyMsg(sessionID string) tea.Msg { return acpReadyMsg{sessionID: sessionID} }
+
+// AcpSessionConnectedMsg installs the connected ACP session. Sent from the
+// backend goroutine; handled on the event loop so m.acpSession is never
+// written concurrently.
+func AcpSessionConnectedMsg(session *openacp.Session) tea.Msg {
+	return acpConnectedMsg{session: session}
+}
 
 // AcpSessionReadyMsg carries the initial boot session plus the config
 // options the server returned with it (mode/model/thought_level), so the
@@ -1159,6 +1166,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouseRelease(msg)
 
 	// ── ACP streaming events ──
+	case acpConnectedMsg:
+		m.acpSession = msg.session
+		return m, nil
 	case acpReadyMsg:
 		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
 		m.sessionTitle = ""
