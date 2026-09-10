@@ -1802,17 +1802,25 @@ func (m *Model) notify(text string) tea.Cmd {
 	}
 }
 
+// messageStoreSize is the byte cost a transcript row contributes to the
+// in-memory and render budgets. Tool payloads count too: a single tool call
+// can return megabytes, and counting only Content would let the store and
+// the rendered document grow unbounded.
+func messageStoreSize(msg ChatMessage) int {
+	return len(msg.Content) + len(msg.ToolInput) + len(msg.ToolOutput) + len(msg.ToolName)
+}
+
 // trimMessageStore keeps the in-memory transcript within maxStoredChars by
 // dropping the oldest messages (17.2 lazy history: only a bounded window is
 // held; search/export cover that window). The newest message always stays.
 func (m *Model) trimMessageStore() {
 	total := 0
 	for i := range m.messages {
-		total += len(m.messages[i].Content)
+		total += messageStoreSize(m.messages[i])
 	}
 	drop := 0
 	for drop < len(m.messages)-1 && total > maxStoredChars {
-		total -= len(m.messages[drop].Content)
+		total -= messageStoreSize(m.messages[drop])
 		drop++
 	}
 	if drop > 0 {
@@ -1894,7 +1902,7 @@ func (m *Model) renderInterval() time.Duration {
 func (m *Model) contentSize() int {
 	n := 0
 	for i := range m.messages {
-		n += len(m.messages[i].Content)
+		n += messageStoreSize(m.messages[i])
 	}
 	return n
 }
@@ -3326,7 +3334,7 @@ func (m *Model) renderMessagesRange(start, end int) string {
 	// renders, even when it alone exceeds the budget.
 	sizes := make([]int, len(m.messages))
 	for i := range m.messages {
-		sizes[i] = len(m.messages[i].Content)
+		sizes[i] = messageStoreSize(m.messages[i])
 	}
 	if keepStart := renderKeepStart(sizes, maxRenderChars); start < keepStart {
 		start = keepStart

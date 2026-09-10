@@ -3955,6 +3955,20 @@ func TestTrimMessageStoreRemapsSearchResults(t *testing.T) {
 	_, _ = m.execSearchSelection()
 }
 
+// A huge tool payload (not Content) must still count toward the memory
+// budget, or the store grows unbounded on a session full of large outputs.
+func TestTrimMessageStoreCountsToolPayloads(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{
+		{Role: "tool", ToolName: "read", ToolOutput: strings.Repeat("x", 2_100_000)},
+		{Role: "user", Content: "keep me"},
+	}
+	m.trimMessageStore()
+	if len(m.messages) != 1 || m.messages[0].Content != "keep me" {
+		t.Fatalf("tool payload not counted, got %d rows", len(m.messages))
+	}
+}
+
 // ── line-level virtual scrolling (17.2) ──
 
 func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
