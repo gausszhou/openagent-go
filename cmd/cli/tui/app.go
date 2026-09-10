@@ -95,6 +95,8 @@ func startACPInProcess(ctx context.Context, p *tea.Program, cfg config.Config, v
 	}
 	clientR, serverW, err := os.Pipe()
 	if err != nil {
+		_ = serverR.Close()
+		_ = clientW.Close()
 		p.Send(chat.AcpErrorMsg(err))
 		return
 	}
@@ -116,6 +118,10 @@ func startACPInProcess(ctx context.Context, p *tea.Program, cfg config.Config, v
 		ProtocolVersion: 1,
 		ClientInfo:      &openacp.Implementation{Name: "openagent-tui", Version: ver},
 	}); err != nil {
+		// Closing the client write end signals EOF to the server reader so
+		// its goroutine can exit instead of blocking forever.
+		_ = clientW.Close()
+		_ = clientR.Close()
 		p.Send(chat.AcpErrorMsg(err))
 		return
 	}

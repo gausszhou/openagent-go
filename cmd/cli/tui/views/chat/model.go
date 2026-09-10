@@ -889,6 +889,18 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Only one dialog can be shown at a time. Requests are serialized
+		// by the SDK reader today, but if a second ever arrives, answer it
+		// cancelled rather than overwriting the pending reply channel and
+		// orphaning its blocked handler.
+		if m.permissionReq != nil {
+			if msg.replyCh != nil {
+				msg.replyCh <- openacp.RequestPermissionResponse{
+					Outcome: openacp.RequestPermissionOutcome{Outcome: "cancelled"},
+				}
+			}
+			return m, nil
+		}
 		m.permissionReq = &msg.req
 		m.permissionReplyCh = msg.replyCh
 		m.permissionSelectedIdx = 0
