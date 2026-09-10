@@ -942,15 +942,17 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				// Three-level semantics: with text pending ctrl+c only
 				// clears the input (never discards what was typed); with
-				// an in-flight prompt it cancels; only when idle does it
-				// quit — so quitting takes a deliberate second press.
+				// an in-flight prompt it cancels and arms a quit; a second
+				// press within the arm window quits even if the backend
+				// never acknowledges the cancel. Idle ctrl+c arms a quit
+				// directly, so quitting always takes a deliberate second
+				// press.
 				if m.chatTextarea.Value() != "" {
 					m.chatTextarea.SetValue("")
 					return m, nil
 				}
 				if m.loading {
 					m.cancelPrompt()
-					return m, nil
 				}
 				return m, m.armQuit()
 			case "ctrl+p":

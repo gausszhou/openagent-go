@@ -258,9 +258,18 @@ func TestCtrlCClearsInputFirst(t *testing.T) {
 func TestCtrlCCancelsWhenLoading(t *testing.T) {
 	m := newTestModel()
 	m.loading = true
+	// First press cancels and arms a quit; it must not quit yet.
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	if cmd != nil {
-		t.Error("ctrl+c while loading must cancel, not quit")
+	if isQuitCmd(cmd) {
+		t.Error("first ctrl+c while loading must cancel, not quit")
+	}
+	if m.quitArmedAt.IsZero() {
+		t.Error("first ctrl+c while loading must arm a quit")
+	}
+	// A second press force-quits even if the backend never acknowledges the
+	// cancel (the lazy-session / hung-backend trap).
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); !isQuitCmd(cmd) {
+		t.Error("second ctrl+c while loading must force-quit")
 	}
 }
 
