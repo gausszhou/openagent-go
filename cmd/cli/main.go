@@ -36,8 +36,17 @@ func main() {
 
 	// 2. Read settings.json.
 	raw, err := os.ReadFile(cfgPath)
-	if err != nil && !os.IsNotExist(err) {
-		log.Fatalf("read settings: %v", err)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Fatalf("read settings: %v", err)
+		}
+		// First run: create an empty settings.json so the user has a file
+		// to edit, `settings get/list` works, and the fsnotify watcher has
+		// something to monitor. Defaults are applied in-memory by
+		// ApplyDefaults (step 5).
+		if wErr := config.WriteConfig(&config.Config{}, cfgPath); wErr != nil {
+			log.Printf("could not create %s: %v", cfgPath, wErr)
+		}
 	}
 	if len(raw) == 0 {
 		raw = []byte("{}")

@@ -490,3 +490,25 @@ func Load(path string) (*Config, error) {
 	}
 	return cfg, nil
 }
+
+// WriteConfig writes the config to path as pretty-printed JSON, creating
+// the parent directory if needed. Used on first run to persist a default
+// settings.json so the user has a file to edit and the fsnotify watcher
+// has something to monitor. Atomic (tmp + rename): a crash mid-write
+// must not leave a truncated file.
+func WriteConfig(cfg *Config, path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
