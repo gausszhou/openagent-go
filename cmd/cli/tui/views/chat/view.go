@@ -870,7 +870,7 @@ func panelFooter(base lipgloss.Style, contentW int, bg color.Color) string {
 	footerText := lipgloss.JoinHorizontal(lipgloss.Left,
 		base.Render(" "),
 		first,
-		components.RenderCommandTipOn("⏎", "run", bg),
+		components.RenderCommandTipOn("enter", "run", bg),
 		components.RenderCommandTipOn("esc", "close", bg),
 	)
 	// Width (not MaxWidth) fills the line out to contentW with the popup
