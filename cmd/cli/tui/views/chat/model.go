@@ -278,6 +278,13 @@ type Model struct {
 	// renderSeq hands out ChatMessage.Seq identities (see ChatMessage.Seq).
 	renderSeq int64
 
+	// expandOverride stores per-message expand state from header clicks,
+	// keyed by ChatMessage.Seq: 1 forces the block open, -1 forces it shut.
+	// An absent key follows the global /toggle_thinking / /toggle_toolcall
+	// baseline. The streaming message (Seq 0) never gets a key: its header
+	// is not clickable, and a key there would collide across messages.
+	expandOverride map[int64]int8
+
 	// fedOffset/fedHeight remember the window the viewport content was last
 	// built for, so the virtual scroll refeeds (styling newly revealed
 	// messages) whenever the user scrolls the window elsewhere.
@@ -1841,6 +1848,7 @@ func (m *Model) trimMessageStore() {
 		for k := 0; k < drop; k++ {
 			if s := m.messages[k].Seq; s != 0 {
 				delete(m.renderCache, s)
+				delete(m.expandOverride, s)
 			}
 		}
 		// searchResults stores transcript indices, so dropping the oldest
@@ -2030,6 +2038,7 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		m.messages = nil
 		m.renderCache = nil
 		m.renderSeq = 0
+		m.expandOverride = nil
 		m.retry = nil
 		m.lastTurnRetries = 0
 		m.lastTurnSteps = 0
@@ -2788,6 +2797,7 @@ type renderCacheEntry struct {
 	vpW                                                  int
 	loading, replaying, turnEnd, permOpen                bool
 	expandThink, showSkill, showShell, showDetail        bool
+	expandOverride                                       int8
 	thoughtStart, thoughtEnd, createdAt                  time.Time
 	compactStart, compactEnd                             time.Time
 	compactedMsgs, freedTokens                           int
@@ -2804,13 +2814,16 @@ type renderCacheEntry struct {
 // replaying are in it too: a block gains (or loses) its turn-end marker row
 // when the next message arrives, the turn completes, or a replay finishes.
 // permOpen gates unapproved tool rows: opening or closing the permission
-// dialog flips whether pending tool calls are hidden.
-func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd, permOpen bool, vc components.VisibleConfig) bool {
+// dialog flips whether pending tool calls are hidden. expandOverride is the
+// per-message click state: flipping one block's override must restyle that
+// block (and only that one — every other message keeps its entry).
+func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd, permOpen bool, vc components.VisibleConfig, expandOverride int8) bool {
 	return e.vpW == vpW &&
 		e.loading == loading &&
 		e.replaying == replaying &&
 		e.turnEnd == turnEnd &&
 		e.permOpen == permOpen &&
+		e.expandOverride == expandOverride &&
 		e.expandThink == vc.ExpandThinking &&
 		e.showSkill == vc.ShowToolSkill &&
 		e.showShell == vc.ShowToolShell &&
@@ -2849,13 +2862,15 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 	}
 	turnEnd := m.isTurnEndAt(i, msg)
 	permOpen := m.permissionReq != nil
+	expandOverride := m.expandOverrideAt(msg.Seq)
 	if e, ok := m.renderCache[msg.Seq]; ok &&
-		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, permOpen, m.visibleConfig) {
+		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, permOpen, m.visibleConfig, expandOverride) {
 		return e.block, e.skip
 	}
 	e := renderCacheEntry{
 		vpW: vpW, loading: m.loading, replaying: m.replaying, turnEnd: turnEnd,
 		permOpen:      permOpen,
+		expandOverride: expandOverride,
 		expandThink:   m.visibleConfig.ExpandThinking,
 		showSkill:     m.visibleConfig.ShowToolSkill,
 		showShell:     m.visibleConfig.ShowToolShell,
@@ -3135,6 +3150,35 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 	}
 }
 
+// expandOverrideAt returns the click override stored for a message Seq
+// (0 when absent or unsynced — a Seq-0 message has no identity yet, so it
+// can never carry an override).
+func (m *Model) expandOverrideAt(seq int64) int8 {
+	if seq == 0 {
+		return 0
+	}
+	return m.expandOverride[seq]
+}
+
+// effectiveThoughtExpanded resolves a thought block's expansion: a click
+// override wins over everything, otherwise the streaming auto-expand or
+// the global /toggle_thinking baseline applies.
+func (m *Model) effectiveThoughtExpanded(msg ChatMessage, streaming bool) bool {
+	if o := m.expandOverrideAt(msg.Seq); o != 0 {
+		return o == 1
+	}
+	return m.visibleConfig.ExpandThinking || streaming
+}
+
+// effectiveToolDetail resolves a tool call's output preview the same way:
+// click override first, then the global /toggle_toolcall baseline.
+func (m *Model) effectiveToolDetail(msg ChatMessage) bool {
+	if o := m.expandOverrideAt(msg.Seq); o != 0 {
+		return o == 1
+	}
+	return m.visibleConfig.ShowToolDetail
+}
+
 // thoughtBlock renders the thought as opencode does — a cardless,
 // warning-colored line with an opencode-style toggle marker: "+" marks a
 // collapsed block (the body is folded into the one-line preview), "-" an
@@ -3143,7 +3187,7 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 // again once the turn closes; /toggle_thinking expands every thought.
 func (m *Model) thoughtBlock(msg ChatMessage, content string, vpW int) (string, bool) {
 	streaming := msg.ThoughtEnd.IsZero() && m.loading
-	expanded := m.visibleConfig.ExpandThinking || streaming
+	expanded := m.effectiveThoughtExpanded(msg, streaming)
 	mark := "+"
 	if expanded {
 		mark = "-"
@@ -3288,7 +3332,7 @@ func (m *Model) toolBody(msg ChatMessage, vpW int) string {
 			line += style.Render(" " + args)
 		}
 	}
-	if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
+	if m.effectiveToolDetail(msg) && msg.ToolOutput != "" {
 		lines := strings.Split(foldOutput(msg.ToolOutput, defaultToolOutputLines), "\n")
 		for i, l := range lines {
 			lines[i] = wrapPlain(l, vpW-transcriptIndent)

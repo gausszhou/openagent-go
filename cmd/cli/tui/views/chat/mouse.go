@@ -35,18 +35,68 @@ func (m *Model) scrollbarMetrics() (thumbH, maxOffset int, ok bool) {
 
 // handleMouseClick routes a left press. The scrollbar claim comes first:
 // the bar column sits right beside the transcript, so without the check a
-// press there would fall through to selection. Other presses are inert for
-// now — panel surfaces have no click targets of their own.
+// press there would fall through to selection. Next a press on a thought/
+// tool block's header row flips that block's expansion and is consumed —
+// header clicks never anchor a selection. Every other press starts the
+// box selection as before.
 func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if msg.Button == tea.MouseLeft && m.inChat && !m.panelOpen && m.permissionReq == nil {
 		if m.startScrollbarDrag(msg.X, msg.Y) {
 			return m, nil
 		}
 		if msg.Y < m.chatViewport.Height() {
+			if m.toggleAtClick(msg.X, msg.Y) {
+				return m, nil
+			}
 			m.startSelection(msg.X, msg.Y)
 		}
 	}
 	return m, nil
+}
+
+// toggleAtClick expands or collapses the thought/tool block whose header
+// row the press landed on. The hit resolves through the same mapping the
+// virtual window renders with (selCellAt row → messageAtLine), so it is
+// exact for anything on screen — the settle pass guarantees visible rows
+// carry exact heights. A block's header is its row 0: block chrome (turn
+// markers) trails the block and never precedes it, and gated-out blocks
+// occupy no rows, so a click can only land on a drawn header. Returns
+// false when the press misses one, leaving the click to the selection.
+func (m *Model) toggleAtClick(x, y int) bool {
+	if y < 0 || y >= m.chatViewport.Height() {
+		return false
+	}
+	row := m.selCellAt(x, y).row - layout.TranscriptTopPad
+	heights := m.virtualLineHeights(layout.GetTranscriptWidth(m.width))
+	idx, within := messageAtLine(heights, row)
+	if idx < 0 || within != 0 {
+		return false
+	}
+	msg := m.messages[idx]
+	if msg.Seq == 0 {
+		// The streaming message has no identity yet (its header is not
+		// clickable, and a Seq-0 key would collide across messages).
+		return false
+	}
+	var expanded bool
+	switch msg.Role {
+	case "thought":
+		expanded = m.effectiveThoughtExpanded(msg, msg.ThoughtEnd.IsZero() && m.loading)
+	case "tool":
+		expanded = m.effectiveToolDetail(msg)
+	default:
+		return false
+	}
+	if m.expandOverride == nil {
+		m.expandOverride = make(map[int64]int8)
+	}
+	if expanded {
+		m.expandOverride[msg.Seq] = -1
+	} else {
+		m.expandOverride[msg.Seq] = 1
+	}
+	m.viewportDirty = true
+	return true
 }
 
 // startScrollbarDrag begins a scrollbar drag from a left press at the bar

@@ -5243,3 +5243,157 @@ func TestReplayBufferAppliedOnLoadError(t *testing.T) {
 		t.Fatalf("buffer must drain on the error path too")
 	}
 }
+
+// ── click-to-expand thought/tool blocks ──
+
+// clickThoughtHeader drives a left press on the thought block's header row
+// (row 0 of message 0 sits TranscriptTopPad rows into the viewport at
+// YOffset 0) through the full Update path.
+func clickThoughtHeader(t *testing.T, m *Model) *Model {
+	t.Helper()
+	upd, _ := m.Update(tea.MouseClickMsg{X: 1, Y: layout.TranscriptTopPad, Button: tea.MouseLeft})
+	return upd.(*Model)
+}
+
+func newClickTestModel(msgs ...ChatMessage) *Model {
+	m := newTestModel()
+	m.inChat = true
+	m.visibleConfig.ExpandThinking = false
+	m.visibleConfig.ShowToolDetail = false
+	m.messages = append(m.messages, msgs...)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.renderMessages() // assign Seqs
+	return m
+}
+
+func TestClickTogglesThoughtHeader(t *testing.T) {
+	m := newClickTestModel(ChatMessage{Role: "thought", Content: "secret reasoning\nmore hidden steps", TurnId: 0})
+	seq := m.messages[0].Seq
+	if seq == 0 {
+		t.Fatal("render must assign a Seq")
+	}
+	if strings.Contains(m.renderMessages(), "secret reasoning") {
+		t.Fatal("precondition: collapsed thought must hide content")
+	}
+
+	m2 := clickThoughtHeader(t, m)
+	if m2.expandOverride[seq] != 1 {
+		t.Fatalf("header click must force the block open, got %d", m2.expandOverride[seq])
+	}
+	if got := m2.renderMessages(); !strings.Contains(got, "secret reasoning") {
+		t.Errorf("expanded thought must render its content:\n%s", got)
+	}
+
+	// The header stays the block's row 0 after expansion, so the same
+	// viewport row toggles it back shut.
+	m2.feedViewport(m2.chatViewport.Height())
+	m3 := clickThoughtHeader(t, m2)
+	if m3.expandOverride[seq] != -1 {
+		t.Fatalf("second click must force the block shut, got %d", m3.expandOverride[seq])
+	}
+	if strings.Contains(m3.renderMessages(), "secret reasoning") {
+		t.Error("forced-shut thought must hide content again")
+	}
+}
+
+func TestClickTogglesToolDetail(t *testing.T) {
+	m := newClickTestModel(ChatMessage{Role: "tool", TurnId: 0, ToolCallID: "a",
+		ToolName: "read_file", ToolStatus: toolDone, ToolOutput: "data line\nsecond line"})
+	seq := m.messages[0].Seq
+	if strings.Contains(m.renderMessages(), "data line") {
+		t.Fatal("precondition: preview must be hidden by default")
+	}
+
+	m2 := clickThoughtHeader(t, m) // message 0 is the tool block here
+	if m2.expandOverride[seq] != 1 {
+		t.Fatalf("tool header click must force the preview open, got %d", m2.expandOverride[seq])
+	}
+	if got := m2.renderMessages(); !strings.Contains(got, "data line") {
+		t.Errorf("forced-open tool must render its output preview:\n%s", got)
+	}
+
+	m2.feedViewport(m2.chatViewport.Height())
+	m3 := clickThoughtHeader(t, m2)
+	if m3.expandOverride[seq] != -1 {
+		t.Fatalf("second click must force the preview shut, got %d", m3.expandOverride[seq])
+	}
+	if strings.Contains(m3.renderMessages(), "data line") {
+		t.Error("forced-shut tool must hide its output preview")
+	}
+}
+
+func TestClickOverrideBeatsGlobalToggle(t *testing.T) {
+	m := newClickTestModel(ChatMessage{Role: "thought", Content: "secret reasoning\nmore hidden steps", TurnId: 0})
+	seq := m.messages[0].Seq
+
+	// A click-shut block stays shut even under a global expand…
+	m.expandOverride = map[int64]int8{seq: -1}
+	m.visibleConfig.ExpandThinking = true
+	if strings.Contains(m.renderMessages(), "secret reasoning") {
+		t.Error("per-message override -1 must beat the global expand")
+	}
+	// …and a click-open block stays open under a global collapse.
+	m.expandOverride = map[int64]int8{seq: 1}
+	m.visibleConfig.ExpandThinking = false
+	if got := m.renderMessages(); !strings.Contains(got, "secret reasoning") {
+		t.Error("per-message override 1 must beat the global collapse")
+	}
+	// Clearing the override returns the block to the global baseline.
+	delete(m.expandOverride, seq)
+	if strings.Contains(m.renderMessages(), "secret reasoning") {
+		t.Error("without an override the global baseline must apply")
+	}
+}
+
+func TestClickMissLeavesSelectionAlone(t *testing.T) {
+	m := newClickTestModel(
+		ChatMessage{Role: "assistant", Content: "plain reply", TurnId: 0},
+		ChatMessage{Role: "thought", Content: "secret reasoning\nmore hidden steps", TurnId: 0},
+	)
+	m.expandOverride = map[int64]int8{m.messages[1].Seq: 1} // expand the thought
+	if m.toggleAtClick(1, layout.TranscriptTopPad) {
+		t.Error("an assistant block header must not toggle")
+	}
+	// The thought's body row (header row + 1) is transcript text: a press
+	// there belongs to the selection gesture, not the toggle.
+	if m.toggleAtClick(1, layout.TranscriptTopPad+1) {
+		t.Error("a body row inside an expanded block must not toggle")
+	}
+	if len(m.expandOverride) != 1 {
+		t.Errorf("missed clicks must not touch the override table, got %d entries", len(m.expandOverride))
+	}
+}
+
+func TestClickSkipsUnsyncedStreamingMessage(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.visibleConfig.ExpandThinking = false
+	m.messages = append(m.messages, ChatMessage{Role: "thought", Content: "streaming…"})
+	// Size the viewport directly — no WindowSizeMsg, whose Update would
+	// feed the viewport and assign Seqs. The message stays unsynced (Seq 0)
+	// exactly as it sits between arrival and its first render.
+	m.chatViewport.SetWidth(80)
+	m.chatViewport.SetHeight(20)
+	if m.toggleAtClick(1, layout.TranscriptTopPad) {
+		t.Error("a Seq-0 (unsynced) message must not toggle")
+	}
+	if len(m.expandOverride) != 0 {
+		t.Error("a skipped click must not create an override entry")
+	}
+}
+
+func TestTrimMessageStoreDropsExpandOverrides(t *testing.T) {
+	m := newTestModel()
+	m.expandOverride = map[int64]int8{7: 1, 8: -1}
+	m.messages = []ChatMessage{
+		{Role: "thought", Content: strings.Repeat("a", 2_100_000), Seq: 7},
+		{Role: "thought", Content: "keep me", Seq: 8},
+	}
+	m.trimMessageStore()
+	if _, ok := m.expandOverride[7]; ok {
+		t.Error("trim must drop overrides of dropped messages")
+	}
+	if m.expandOverride[8] != -1 {
+		t.Error("trim must keep overrides of kept messages")
+	}
+}
