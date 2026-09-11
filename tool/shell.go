@@ -336,7 +336,7 @@ func truncateStr(s string, maxLen int) string {
 type ShellParams struct {
 	Command     string `json:"command" jsonschema:"description=The shell command to execute"`
 	Description string `json:"description,omitempty" jsonschema:"description=The intent of this command (3-8 words). Every command should have a purpose — provide this whenever possible."`
-	RiskNote    string `json:"risk_note,omitempty" jsonschema:"description=For destructive/irreversible commands (rm -rf /, terraform apply, kubectl delete, git push --force, etc.), state the risk reason in a few words. Empty for safe commands."`
+	RiskNote    string `json:"risk_note,omitempty" jsonschema:"description=Only for HIGH-RISK operations with real-world consequences beyond file changes: spending money (cloud deploy, paid API call), reducing security (disabling firewall, exposing a port), breaking the system (rm -rf /, dd to disk), data loss at scale (DROP TABLE, git push --force to shared branch). Describe the consequence if it goes wrong (e.g. 'incurs cloud billing', 'exposes service to public internet'). Do NOT fill for ordinary file/dir operations (rm single file, rm build dir, mkdir, cp, mv). Empty = safe."`
 	Timeout     int    `json:"timeout,omitempty" jsonschema:"description=Seconds to wait before the command is backgrounded (default: 30, min: 1, max: 600)"`
 }
 
