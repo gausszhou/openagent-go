@@ -278,6 +278,13 @@ type Model struct {
 	// renderSeq hands out ChatMessage.Seq identities (see ChatMessage.Seq).
 	renderSeq int64
 
+	// expandOverride stores per-message expand state from header clicks,
+	// keyed by ChatMessage.Seq: 1 forces the block open, -1 forces it shut.
+	// An absent key follows the global /toggle_thinking / /toggle_toolcall
+	// baseline. The streaming message (Seq 0) never gets a key: its header
+	// is not clickable, and a key there would collide across messages.
+	expandOverride map[int64]int8
+
 	// fedOffset/fedHeight remember the window the viewport content was last
 	// built for, so the virtual scroll refeeds (styling newly revealed
 	// messages) whenever the user scrolls the window elsewhere.
@@ -672,18 +679,18 @@ func (m *Model) SetProgram(p *tea.Program) {
 	m.program = p
 }
 
-// SetACPSession injects the ACP session once the in-process backend
-// connection is established. Called by startACPInProcess in app.go.
-func (m *Model) SetACPSession(s *openacp.Session) {
-	m.acpSession = s
-}
-
 // ── ACP tea.Msg types ──
 
 type acpReadyMsg struct {
 	sessionID     string
 	configOptions []openacp.SessionConfigOption
 }
+
+// acpConnectedMsg delivers the connected ACP session into the event loop.
+// The backend handshake runs on a goroutine, so the session handle must be
+// installed here (not written straight onto the Model) to keep the field
+// single-goroutine and race-free.
+type acpConnectedMsg struct{ session *openacp.Session }
 type agentMessageMsg struct {
 	text      string
 	createdAt time.Time // from replay _meta; zero on live streams (stamp on arrival)
@@ -797,6 +804,13 @@ type permissionRequestMsg struct {
 // Exported constructors for app.go to send these msgs from the ACP goroutine.
 func AcpReadyMsg(sessionID string) tea.Msg { return acpReadyMsg{sessionID: sessionID} }
 
+// AcpSessionConnectedMsg installs the connected ACP session. Sent from the
+// backend goroutine; handled on the event loop so m.acpSession is never
+// written concurrently.
+func AcpSessionConnectedMsg(session *openacp.Session) tea.Msg {
+	return acpConnectedMsg{session: session}
+}
+
 // AcpSessionReadyMsg carries the initial boot session plus the config
 // options the server returned with it (mode/model/thought_level), so the
 // input header can show them right away instead of waiting for a
@@ -882,6 +896,18 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Only one dialog can be shown at a time. Requests are serialized
+		// by the SDK reader today, but if a second ever arrives, answer it
+		// cancelled rather than overwriting the pending reply channel and
+		// orphaning its blocked handler.
+		if m.permissionReq != nil {
+			if msg.replyCh != nil {
+				msg.replyCh <- openacp.RequestPermissionResponse{
+					Outcome: openacp.RequestPermissionOutcome{Outcome: "cancelled"},
+				}
+			}
+			return m, nil
+		}
 		m.permissionReq = &msg.req
 		m.permissionReplyCh = msg.replyCh
 		m.permissionSelectedIdx = 0
@@ -935,15 +961,17 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				// Three-level semantics: with text pending ctrl+c only
 				// clears the input (never discards what was typed); with
-				// an in-flight prompt it cancels; only when idle does it
-				// quit — so quitting takes a deliberate second press.
+				// an in-flight prompt it cancels and arms a quit; a second
+				// press within the arm window quits even if the backend
+				// never acknowledges the cancel. Idle ctrl+c arms a quit
+				// directly, so quitting always takes a deliberate second
+				// press.
 				if m.chatTextarea.Value() != "" {
 					m.chatTextarea.SetValue("")
 					return m, nil
 				}
 				if m.loading {
 					m.cancelPrompt()
-					return m, nil
 				}
 				return m, m.armQuit()
 			case "ctrl+p":
@@ -1159,8 +1187,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouseRelease(msg)
 
 	// ── ACP streaming events ──
+	case acpConnectedMsg:
+		m.acpSession = msg.session
+		return m, nil
 	case acpReadyMsg:
-		m.activeSessionID = msg.sessionID
+		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
 		m.sessionTitle = ""
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
@@ -1317,7 +1348,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "New session failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.activeSessionID = msg.sessionID
+		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
 		m.sessionTitle = "" // fresh session: title arrives via session_info_update
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
@@ -1405,8 +1436,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "Load session failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.activeSessionID = msg.sessionID
-		m.sessionTitle = msg.title
+		m.activeSessionID = utils.SanitizeControl(msg.sessionID)
+		m.sessionTitle = utils.SanitizeControl(msg.title)
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 		}
@@ -1511,7 +1542,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = ""
 		}
 		m.closeTrailingThought()
-		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error(), CreatedAt: time.Now()})
+		m.messages = append(m.messages, ChatMessage{Role: "error", Content: utils.SanitizeControl(msg.err.Error()), CreatedAt: time.Now()})
 		m.loading = false
 		m.viewportDirty = true
 		return m, nil
@@ -1792,23 +1823,48 @@ func (m *Model) notify(text string) tea.Cmd {
 	}
 }
 
+// messageStoreSize is the byte cost a transcript row contributes to the
+// in-memory and render budgets. Tool payloads count too: a single tool call
+// can return megabytes, and counting only Content would let the store and
+// the rendered document grow unbounded.
+func messageStoreSize(msg ChatMessage) int {
+	return len(msg.Content) + len(msg.ToolInput) + len(msg.ToolOutput) + len(msg.ToolName)
+}
+
 // trimMessageStore keeps the in-memory transcript within maxStoredChars by
 // dropping the oldest messages (17.2 lazy history: only a bounded window is
 // held; search/export cover that window). The newest message always stays.
 func (m *Model) trimMessageStore() {
 	total := 0
 	for i := range m.messages {
-		total += len(m.messages[i].Content)
+		total += messageStoreSize(m.messages[i])
 	}
 	drop := 0
 	for drop < len(m.messages)-1 && total > maxStoredChars {
-		total -= len(m.messages[drop].Content)
+		total -= messageStoreSize(m.messages[drop])
 		drop++
 	}
 	if drop > 0 {
 		for k := 0; k < drop; k++ {
 			if s := m.messages[k].Seq; s != 0 {
 				delete(m.renderCache, s)
+				delete(m.expandOverride, s)
+			}
+		}
+		// searchResults stores transcript indices, so dropping the oldest
+		// messages shifts every match. Remap them in place (matches in the
+		// dropped prefix fall away) — otherwise the search overlay would
+		// index past the shortened slice and panic.
+		if len(m.searchResults) > 0 {
+			kept := m.searchResults[:0]
+			for _, idx := range m.searchResults {
+				if idx >= drop {
+					kept = append(kept, idx-drop)
+				}
+			}
+			m.searchResults = kept
+			if m.panelIdx >= len(m.searchResults) {
+				m.panelIdx = 0
 			}
 		}
 		m.messages = m.messages[drop:]
@@ -1868,7 +1924,7 @@ func (m *Model) renderInterval() time.Duration {
 func (m *Model) contentSize() int {
 	n := 0
 	for i := range m.messages {
-		n += len(m.messages[i].Content)
+		n += messageStoreSize(m.messages[i])
 	}
 	return n
 }
@@ -1982,6 +2038,7 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		m.messages = nil
 		m.renderCache = nil
 		m.renderSeq = 0
+		m.expandOverride = nil
 		m.retry = nil
 		m.lastTurnRetries = 0
 		m.lastTurnSteps = 0
@@ -2288,6 +2345,9 @@ func (m *Model) execSearchSelection() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	idx := m.searchResults[m.panelIdx]
+	if idx < 0 || idx >= len(m.messages) {
+		return m, nil
+	}
 	// Jump via the virtual line mapping: feed a document whose styled
 	// window is the destination (SetYOffset clamps against it), then place
 	// the match's first estimated row at the top of the window.
@@ -2737,6 +2797,7 @@ type renderCacheEntry struct {
 	vpW                                                  int
 	loading, replaying, turnEnd, permOpen                bool
 	expandThink, showSkill, showShell, showDetail        bool
+	expandOverride                                       int8
 	thoughtStart, thoughtEnd, createdAt                  time.Time
 	compactStart, compactEnd                             time.Time
 	compactedMsgs, freedTokens                           int
@@ -2753,13 +2814,16 @@ type renderCacheEntry struct {
 // replaying are in it too: a block gains (or loses) its turn-end marker row
 // when the next message arrives, the turn completes, or a replay finishes.
 // permOpen gates unapproved tool rows: opening or closing the permission
-// dialog flips whether pending tool calls are hidden.
-func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd, permOpen bool, vc components.VisibleConfig) bool {
+// dialog flips whether pending tool calls are hidden. expandOverride is the
+// per-message click state: flipping one block's override must restyle that
+// block (and only that one — every other message keeps its entry).
+func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd, permOpen bool, vc components.VisibleConfig, expandOverride int8) bool {
 	return e.vpW == vpW &&
 		e.loading == loading &&
 		e.replaying == replaying &&
 		e.turnEnd == turnEnd &&
 		e.permOpen == permOpen &&
+		e.expandOverride == expandOverride &&
 		e.expandThink == vc.ExpandThinking &&
 		e.showSkill == vc.ShowToolSkill &&
 		e.showShell == vc.ShowToolShell &&
@@ -2798,26 +2862,28 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 	}
 	turnEnd := m.isTurnEndAt(i, msg)
 	permOpen := m.permissionReq != nil
+	expandOverride := m.expandOverrideAt(msg.Seq)
 	if e, ok := m.renderCache[msg.Seq]; ok &&
-		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, permOpen, m.visibleConfig) {
+		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, permOpen, m.visibleConfig, expandOverride) {
 		return e.block, e.skip
 	}
 	e := renderCacheEntry{
 		vpW: vpW, loading: m.loading, replaying: m.replaying, turnEnd: turnEnd,
-		permOpen:      permOpen,
-		expandThink:   m.visibleConfig.ExpandThinking,
-		showSkill:     m.visibleConfig.ShowToolSkill,
-		showShell:     m.visibleConfig.ShowToolShell,
-		showDetail:    m.visibleConfig.ShowToolDetail,
-		thoughtStart:  msg.ThoughtStart,
-		thoughtEnd:    msg.ThoughtEnd,
-		createdAt:     msg.CreatedAt,
-		compactStart:  msg.CompactStart,
-		compactEnd:    msg.CompactEnd,
-		compactedMsgs: msg.CompactedMsgs,
-		freedTokens:   msg.FreedTokens,
-		compactError:  msg.CompactError,
-		role:          msg.Role, content: msg.Content,
+		permOpen:       permOpen,
+		expandOverride: expandOverride,
+		expandThink:    m.visibleConfig.ExpandThinking,
+		showSkill:      m.visibleConfig.ShowToolSkill,
+		showShell:      m.visibleConfig.ShowToolShell,
+		showDetail:     m.visibleConfig.ShowToolDetail,
+		thoughtStart:   msg.ThoughtStart,
+		thoughtEnd:     msg.ThoughtEnd,
+		createdAt:      msg.CreatedAt,
+		compactStart:   msg.CompactStart,
+		compactEnd:     msg.CompactEnd,
+		compactedMsgs:  msg.CompactedMsgs,
+		freedTokens:    msg.FreedTokens,
+		compactError:   msg.CompactError,
+		role:           msg.Role, content: msg.Content,
 		toolName: msg.ToolName, toolStatus: msg.ToolStatus,
 		toolIn: msg.ToolInput, toolOut: msg.ToolOutput,
 	}
@@ -3084,6 +3150,35 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 	}
 }
 
+// expandOverrideAt returns the click override stored for a message Seq
+// (0 when absent or unsynced — a Seq-0 message has no identity yet, so it
+// can never carry an override).
+func (m *Model) expandOverrideAt(seq int64) int8 {
+	if seq == 0 {
+		return 0
+	}
+	return m.expandOverride[seq]
+}
+
+// effectiveThoughtExpanded resolves a thought block's expansion: a click
+// override wins over everything, otherwise the streaming auto-expand or
+// the global /toggle_thinking baseline applies.
+func (m *Model) effectiveThoughtExpanded(msg ChatMessage, streaming bool) bool {
+	if o := m.expandOverrideAt(msg.Seq); o != 0 {
+		return o == 1
+	}
+	return m.visibleConfig.ExpandThinking || streaming
+}
+
+// effectiveToolDetail resolves a tool call's output preview the same way:
+// click override first, then the global /toggle_toolcall baseline.
+func (m *Model) effectiveToolDetail(msg ChatMessage) bool {
+	if o := m.expandOverrideAt(msg.Seq); o != 0 {
+		return o == 1
+	}
+	return m.visibleConfig.ShowToolDetail
+}
+
 // thoughtBlock renders the thought as opencode does — a cardless,
 // warning-colored line with an opencode-style toggle marker: "+" marks a
 // collapsed block (the body is folded into the one-line preview), "-" an
@@ -3092,7 +3187,7 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 // again once the turn closes; /toggle_thinking expands every thought.
 func (m *Model) thoughtBlock(msg ChatMessage, content string, vpW int) (string, bool) {
 	streaming := msg.ThoughtEnd.IsZero() && m.loading
-	expanded := m.visibleConfig.ExpandThinking || streaming
+	expanded := m.effectiveThoughtExpanded(msg, streaming)
 	mark := "+"
 	if expanded {
 		mark = "-"
@@ -3237,7 +3332,7 @@ func (m *Model) toolBody(msg ChatMessage, vpW int) string {
 			line += style.Render(" " + args)
 		}
 	}
-	if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
+	if m.effectiveToolDetail(msg) && msg.ToolOutput != "" {
 		lines := strings.Split(foldOutput(msg.ToolOutput, defaultToolOutputLines), "\n")
 		for i, l := range lines {
 			lines[i] = wrapPlain(l, vpW-transcriptIndent)
@@ -3297,7 +3392,7 @@ func (m *Model) renderMessagesRange(start, end int) string {
 	// renders, even when it alone exceeds the budget.
 	sizes := make([]int, len(m.messages))
 	for i := range m.messages {
-		sizes[i] = len(m.messages[i].Content)
+		sizes[i] = messageStoreSize(m.messages[i])
 	}
 	if keepStart := renderKeepStart(sizes, maxRenderChars); start < keepStart {
 		start = keepStart

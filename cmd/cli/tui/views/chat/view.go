@@ -197,8 +197,8 @@ func (m *Model) renderSplitPane(h int) string {
 	base := theme.BaseStyle().Width(w).Height(max(1, h)).Background(theme.BgSurface).Padding(0, 1)
 	var b strings.Builder
 	b.WriteString(theme.BaseStyle().Foreground(theme.TextNormal).Bold(true).Render("Context"))
-	b.WriteString("\nSession: " + m.activeSessionID)
-	b.WriteString("\nModel: " + m.currentModel())
+	b.WriteString("\nSession: " + utils.SanitizeControl(m.activeSessionID))
+	b.WriteString("\nModel: " + utils.SanitizeControl(m.currentModel()))
 	for _, e := range m.planEntries {
 		mark := "-"
 		switch e.Status {
@@ -322,7 +322,7 @@ func (m *Model) renderModeBadge() string {
 // "<provider>/<model>"; truncated so a long id cannot wrap the single-line
 // header.
 func (m *Model) renderModelBadge() string {
-	model := m.currentModel()
+	model := utils.SanitizeControl(m.currentModel())
 	if model == "" {
 		return ""
 	}
@@ -362,10 +362,13 @@ func (m *Model) renderStatus() string {
 	m.statusBar.Width = contentWidth
 	// Toasts no longer ride the status line — they float top-right (see
 	// renderToast) — so the persistent status/spinner always shows.
+	// statusText can embed a server error string, so strip control
+	// sequences before it reaches the terminal.
+	status := utils.SanitizeControl(m.statusText)
 	if m.loading {
-		m.statusBar.Status = m.spinner.View() + " " + m.statusText
+		m.statusBar.Status = m.spinner.View() + " " + status
 	} else {
-		m.statusBar.Status = m.statusText
+		m.statusBar.Status = status
 	}
 	m.statusBar.Help = help
 	return m.statusBar.View()
@@ -391,7 +394,7 @@ func (m *Model) renderToast() string {
 		Border(lipgloss.Border{Left: "┃", Right: "┃"}, false, true, false, true).
 		BorderForeground(theme.Notify)
 	textW := 0
-	for _, line := range strings.Split(m.notifyMsg, "\n") {
+	for _, line := range strings.Split(utils.SanitizeControl(m.notifyMsg), "\n") {
 		if w := utils.DisplayWidth(line); w > textW {
 			textW = w
 		}
@@ -402,7 +405,7 @@ func (m *Model) renderToast() string {
 	if textW+6 > maxW {
 		style = style.Width(maxW)
 	}
-	return style.Render(m.notifyMsg)
+	return style.Render(utils.SanitizeControl(m.notifyMsg))
 }
 
 // renderPlanList draws the agent's plan as a TODO list ("Plans n/m" + status
@@ -485,7 +488,7 @@ func (m *Model) renderRight() string {
 		sessionLabel = m.sessionTitle
 	}
 	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).
-		Render(utils.TruncateByWidth(sessionLabel, width-2))
+		Render(utils.TruncateByWidth(utils.SanitizeControl(sessionLabel), width-2))
 
 	contextTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Context")
 	contextLines := []string{
@@ -539,10 +542,10 @@ func (m *Model) renderRight() string {
 	header := lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 
 	workDirTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("WorkDir")
-	workDirValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.workDir)
+	workDirValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(utils.SanitizeControl(m.workDir))
 
 	versionTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Version")
-	versionValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.version)
+	versionValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(utils.SanitizeControl(m.version))
 	footer := lipgloss.JoinVertical(lipgloss.Left, workDirTitle, workDirValue, "", versionTitle, versionValue)
 
 	headerH := lipgloss.Height(header)
@@ -867,7 +870,7 @@ func panelFooter(base lipgloss.Style, contentW int, bg color.Color) string {
 	footerText := lipgloss.JoinHorizontal(lipgloss.Left,
 		base.Render(" "),
 		first,
-		components.RenderCommandTipOn("⏎", "run", bg),
+		components.RenderCommandTipOn("enter", "run", bg),
 		components.RenderCommandTipOn("esc", "close", bg),
 	)
 	// Width (not MaxWidth) fills the line out to contentW with the popup
@@ -1124,7 +1127,7 @@ func (m *Model) renderSessionPanel() string {
 			if ts != "" {
 				nameBudget -= lipgloss.Width(ts) + 2
 			}
-			name := utils.TruncateByWidth(it.title, max(8, nameBudget))
+			name := utils.TruncateByWidth(utils.SanitizeControl(it.title), max(8, nameBudget))
 			gap := max(0, contentW-2-lipgloss.Width(name)-lipgloss.Width(ts))
 			cells := []string{rowStyle.Foreground(nameFg).Render(name)}
 			if ts != "" {
@@ -1191,7 +1194,7 @@ func (m *Model) renderModelPanel() string {
 				nameFg = theme.TextInk
 			}
 			// The name lives inside the row's 1-column horizontal padding.
-			name := utils.TruncateByWidth(id, contentW-6)
+			name := utils.TruncateByWidth(utils.SanitizeControl(id), contentW-6)
 			pad := max(0, contentW-2-lipgloss.Width(name))
 			rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left,
 				rowStyle.Foreground(nameFg).Render(name),
@@ -1222,11 +1225,11 @@ func (m *Model) renderConfigPanel() string {
 			rowStyle = base.Background(theme.CommandActive)
 			nameFg, descFg = theme.TextInk, theme.TextInk
 		}
-		name := utils.TruncateByWidth(opt.name, 12)
+		name := utils.TruncateByWidth(utils.SanitizeControl(opt.name), 12)
 		// The description budget accounts for the name column (fixed at 14
 		// cells) plus inner padding and the row's 2 padding columns, so a
 		// long description can never wrap the row into two lines.
-		desc := utils.TruncateByWidth(opt.desc, max(8, contentW-14-8))
+		desc := utils.TruncateByWidth(utils.SanitizeControl(opt.desc), max(8, contentW-14-8))
 		pad := max(0, 14-lipgloss.Width(name))
 		gap := max(0, contentW-2-lipgloss.Width(name)-pad-lipgloss.Width(desc))
 		rows = append(rows, rowStyle.Padding(0, 1).Width(contentW).Render(lipgloss.JoinHorizontal(lipgloss.Left,
@@ -1238,7 +1241,7 @@ func (m *Model) renderConfigPanel() string {
 	}
 	title := "Options"
 	if o := sessionConfigOption(m.configOptions, m.configPickerID); o != nil && o.Name != "" {
-		title = o.Name // data-driven: "Session Mode", "Reasoning Level", ...
+		title = utils.SanitizeControl(o.Name) // data-driven: "Session Mode", "Reasoning Level", ...
 	}
 	return m.popupPanel(title, "", rows)
 }
@@ -1252,7 +1255,7 @@ func (m *Model) renderConfigPanel() string {
 func (m *Model) renderExportPanel() string {
 	base, contentW := m.popupBase()
 	var rows []string
-	for _, ln := range strings.Split(m.exportNotice, "\n") {
+	for _, ln := range strings.Split(utils.SanitizeControl(m.exportNotice), "\n") {
 		for {
 			r := []rune(ln)
 			if len(r) <= contentW-2 {
@@ -1346,6 +1349,9 @@ func (m *Model) renderSearchPanel() string {
 	default:
 		first, last := m.windowPanelRows(len(m.searchResults))
 		for i, mi := range m.searchResults[first:last] {
+			if mi < 0 || mi >= len(m.messages) {
+				continue // stale match from a trimmed transcript
+			}
 			src := m.messages[mi]
 			snippet := src.Role + ": " + utils.TruncateByWidth(
 				strings.Join(strings.Split(utils.UnifiedEndOfLine(src.Content), "\n")[:1], ""), contentW-4)

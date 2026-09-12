@@ -85,6 +85,40 @@ func UnifiedEndOfLine(s string) string {
 	return s
 }
 
+// isControl reports whether r is a C0 control (except the layout whitespace
+// the UI keeps), DEL, or a C1 control. ESC (\x1b) is a C0 control, so the
+// whole ANSI/OSC escape family is covered.
+func isControl(r rune) bool {
+	switch r {
+	case '\n', '\t':
+		return false
+	}
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// SanitizeControl removes terminal control characters from untrusted text
+// (agent replies, tool output, session metadata) before it is rendered.
+// Without this, a malicious tool result or fetched page can smuggle ANSI/OSC
+// sequences into the terminal — e.g. OSC 52 clipboard writes, OSC 8 link
+// spoofing, title changes or cursor moves. Line endings are normalized first,
+// then every control rune except \n and \t is dropped. The UI's own styling
+// is added after this point, so no legitimate SGR is lost.
+func SanitizeControl(s string) string {
+	if !strings.ContainsFunc(s, isControl) {
+		return s
+	}
+	s = UnifiedEndOfLine(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if isControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // sgrStateRe matches SGR sequences (the "m" flavor of CSI): plain resets
 // and parameterized styles.
 var sgrStateRe = regexp.MustCompile(`\x1b\[([0-9;]*)m`)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/components"
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/theme"
+	"github.com/yusheng-g/openagent-go/cmd/cli/tui/utils"
 )
 
 // welcomeInputWidth is the width of the whole input area (frame, padding,
@@ -54,14 +55,14 @@ func (m *Model) renderWelcome(geom *viewGeom) string {
 	}
 	full := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Top, content, lipgloss.WithWhitespaceStyle(theme.BaseStyle()))
 
-	workDirValue := theme.BaseStyle().PaddingLeft(1).Foreground(theme.TextAsh).Render(m.workDir)
+	workDirValue := theme.BaseStyle().PaddingLeft(1).Foreground(theme.TextAsh).Render(utils.SanitizeControl(m.workDir))
 	// MCP indicator (⊙ N MCP) sits right of the workdir in the bottom-left
 	// corner; absent when no server is configured.
 	left := workDirValue
 	if ind := m.mcpIndicator(); ind != "" {
 		left = lipgloss.JoinHorizontal(lipgloss.Left, workDirValue, ind)
 	}
-	versionValue := theme.BaseStyle().Width(m.width - lipgloss.Width(left)).PaddingRight(1).Align(lipgloss.Right).Foreground(theme.TextAsh).Render(m.version)
+	versionValue := theme.BaseStyle().Width(m.width - lipgloss.Width(left)).PaddingRight(1).Align(lipgloss.Right).Foreground(theme.TextAsh).Render(utils.SanitizeControl(m.version))
 	footer := lipgloss.JoinHorizontal(lipgloss.Left, left, versionValue)
 
 	return theme.BaseStyle().Width(m.width).Height(m.height).Render(

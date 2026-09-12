@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	openacp "github.com/yusheng-g/openagent-go/acp/sdk"
+	"github.com/yusheng-g/openagent-go/cmd/cli/tui/utils"
 )
 
 // acpEventHandler implements both openacp.EventHandler and
@@ -57,15 +58,15 @@ func acpMetaTime(meta map[string]any) time.Time {
 }
 
 func (h *acpEventHandler) OnAgentMessage(text string, meta map[string]any) {
-	h.program.Send(agentMessageMsg{text: text, createdAt: acpMetaTime(meta)})
+	h.program.Send(agentMessageMsg{text: utils.SanitizeControl(text), createdAt: acpMetaTime(meta)})
 }
 
 func (h *acpEventHandler) OnAgentThought(text string, meta map[string]any) {
-	h.program.Send(agentThoughtMsg{text: text, createdAt: acpMetaTime(meta)})
+	h.program.Send(agentThoughtMsg{text: utils.SanitizeControl(text), createdAt: acpMetaTime(meta)})
 }
 
 func (h *acpEventHandler) OnUserMessage(text string, meta map[string]any) {
-	h.program.Send(userMessageMsg{text: text, createdAt: acpMetaTime(meta)})
+	h.program.Send(userMessageMsg{text: utils.SanitizeControl(text), createdAt: acpMetaTime(meta)})
 }
 
 // acpMetaInt reads an integer field from a sessionUpdate's _meta (JSON
@@ -101,7 +102,7 @@ func (h *acpEventHandler) OnRetrying(meta map[string]any) {
 		attempt:   acpMetaInt(meta, "attempt"),
 		max:       acpMetaInt(meta, "max_retries"),
 		delay:     delay,
-		errStr:    acpMetaStr(meta, "error"),
+		errStr:    utils.SanitizeControl(acpMetaStr(meta, "error")),
 		startedAt: time.Now(),
 	})
 }
@@ -110,7 +111,7 @@ func (h *acpEventHandler) OnContextCompacted(meta map[string]any) {
 	h.program.Send(contextCompactedMsg{
 		compressed: acpMetaInt(meta, "compressed_messages"),
 		freed:      acpMetaInt(meta, "freed_tokens"),
-		errStr:     acpMetaStr(meta, "error"),
+		errStr:     utils.SanitizeControl(acpMetaStr(meta, "error")),
 	})
 }
 
@@ -118,7 +119,7 @@ func (h *acpEventHandler) OnToolCall(tc openacp.ToolCallUpdate) {
 	// ACP 3-phase lifecycle: "pending" = announced but not yet approved to
 	// run (kept off the transcript while its permission dialog is open),
 	// "in_progress" = actually executing. Unknown statuses render as running.
-	msg := toolCallMsg{id: tc.ToolCallID, title: tc.Title, status: toolRunning, createdAt: acpMetaTime(tc.Meta)}
+	msg := toolCallMsg{id: tc.ToolCallID, title: utils.SanitizeControl(tc.Title), status: toolRunning, createdAt: acpMetaTime(tc.Meta)}
 	switch tc.Status {
 	case "pending":
 		msg.status = toolPending
@@ -130,12 +131,12 @@ func (h *acpEventHandler) OnToolCall(tc openacp.ToolCallUpdate) {
 		msg.status = toolFailed
 	}
 	if b, err := json.Marshal(tc.RawInput); err == nil && string(b) != "null" {
-		msg.input = string(b)
+		msg.input = utils.SanitizeControl(string(b))
 	}
 	if out := toolOutputText(tc.RawOutput); out != "" {
-		msg.output = out
+		msg.output = utils.SanitizeControl(out)
 	} else if b, err := json.Marshal(tc.RawOutput); err == nil && string(b) != "null" {
-		msg.output = string(b)
+		msg.output = utils.SanitizeControl(string(b))
 	}
 	h.program.Send(msg)
 }
@@ -161,6 +162,9 @@ func toolOutputText(raw any) string {
 }
 
 func (h *acpEventHandler) OnPlan(plan openacp.Plan) {
+	for i := range plan.Entries {
+		plan.Entries[i].Content = utils.SanitizeControl(plan.Entries[i].Content)
+	}
 	h.program.Send(planMsg{entries: plan.Entries})
 }
 
@@ -168,11 +172,27 @@ func (h *acpEventHandler) OnAvailableCommandsUpdate(cmds []openacp.AvailableComm
 }
 
 func (h *acpEventHandler) OnModeUpdate(modeID openacp.SessionModeId) {
-	h.program.Send(modeUpdateMsg{mode: string(modeID)})
+	h.program.Send(modeUpdateMsg{mode: utils.SanitizeControl(string(modeID))})
 }
 
 func (h *acpEventHandler) OnConfigOptionUpdate(opts []openacp.SessionConfigOption) {
-	h.program.Send(configOptionsMsg{opts: opts})
+	h.program.Send(configOptionsMsg{opts: sanitizeConfigOptions(opts)})
+}
+
+// sanitizeConfigOptions strips terminal control characters from every
+// server-supplied display string in the config options (option names and
+// descriptions, and each select value's name/description) so the pickers
+// cannot be used to smuggle escape sequences into the terminal.
+func sanitizeConfigOptions(opts []openacp.SessionConfigOption) []openacp.SessionConfigOption {
+	for i := range opts {
+		opts[i].Name = utils.SanitizeControl(opts[i].Name)
+		opts[i].Description = utils.SanitizeControl(opts[i].Description)
+		for j := range opts[i].Options {
+			opts[i].Options[j].Name = utils.SanitizeControl(opts[i].Options[j].Name)
+			opts[i].Options[j].Description = utils.SanitizeControl(opts[i].Options[j].Description)
+		}
+	}
+	return opts
 }
 
 func (h *acpEventHandler) OnUsageUpdate(used, total int, cost *openacp.Cost) {
@@ -180,10 +200,13 @@ func (h *acpEventHandler) OnUsageUpdate(used, total int, cost *openacp.Cost) {
 }
 
 func (h *acpEventHandler) OnSessionInfo(title string, metadata map[string]any) {
-	h.program.Send(sessionInfoMsg{title: title})
+	h.program.Send(sessionInfoMsg{title: utils.SanitizeControl(title)})
 }
 
 func (h *acpEventHandler) OnMcpServers(servers []openacp.McpServerStatus) {
+	for i := range servers {
+		servers[i].Name = utils.SanitizeControl(servers[i].Name)
+	}
 	h.program.Send(mcpServersMsg{servers: servers})
 }
 

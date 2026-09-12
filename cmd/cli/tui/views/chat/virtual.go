@@ -95,7 +95,7 @@ func (m *Model) cachedMessageHeight(i int, msg ChatMessage, vpW int) (int, bool)
 		return 0, false
 	}
 	turnEnd := m.isTurnEndAt(i, msg)
-	if !renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, m.permissionReq != nil, m.visibleConfig) {
+	if !renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, m.permissionReq != nil, m.visibleConfig, m.expandOverrideAt(msg.Seq)) {
 		return 0, false
 	}
 	if e.skip || e.block == "" {
@@ -113,7 +113,7 @@ func (m *Model) estimateMessageHeight(i int, msg ChatMessage, vpW int) int {
 	rows := 2                            // card chrome: padding + separator rows
 	switch msg.Role {
 	case "thought":
-		expanded := m.visibleConfig.ExpandThinking || (msg.ThoughtEnd.IsZero() && m.loading)
+		expanded := m.effectiveThoughtExpanded(msg, msg.ThoughtEnd.IsZero() && m.loading)
 		if expanded {
 			rows += 1 + wrappedRows(msg.Content, w)
 		} else {
@@ -132,7 +132,7 @@ func (m *Model) estimateMessageHeight(i int, msg ChatMessage, vpW int) int {
 			return 0
 		}
 		rows++ // status line
-		if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
+		if m.effectiveToolDetail(msg) && msg.ToolOutput != "" {
 			rows += min(strings.Count(msg.ToolOutput, "\n")+1, defaultToolOutputLines) + 1
 		}
 	default:
